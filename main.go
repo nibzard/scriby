@@ -118,6 +118,42 @@ type RuntimeAsset struct {
 	SHA256 string `json:"sha256,omitempty"`
 }
 
+type ProgressReporter struct {
+	OutputMode string
+	Command    string
+	RunID      string
+}
+
+func newProgressReporter(outputMode string, command string, runID string) *ProgressReporter {
+	return &ProgressReporter{
+		OutputMode: outputMode,
+		Command:    command,
+		RunID:      runID,
+	}
+}
+
+func (p *ProgressReporter) Step(event string, message string, data map[string]any) {
+	if p == nil {
+		return
+	}
+
+	if p.OutputMode == "jsonl" {
+		payload := map[string]any{}
+		for k, v := range data {
+			payload[k] = v
+		}
+		if strings.TrimSpace(message) != "" {
+			payload["message"] = message
+		}
+		emitJSONLEvent(p.Command, p.RunID, event, payload)
+		return
+	}
+
+	if strings.TrimSpace(message) != "" {
+		fmt.Fprintf(os.Stderr, "[scriby] %s\n", message)
+	}
+}
+
 type RunData struct {
 	Input       string       `json:"input"`
 	FFmpegPath  string       `json:"ffmpeg_path"`
@@ -370,6 +406,8 @@ func handleRun(args []string) (Envelope, int) {
 
 	ctx, cancel := commandContext(global.TimeoutMS)
 	defer cancel()
+	progress := newProgressReporter(global.Output, "run", env.RunID)
+	progress.Step("run.start", fmt.Sprintf("Starting run for %s", cfg.Input), map[string]any{"input": cfg.Input})
 
 	ffmpegPath, ferr := ensureFFmpegPath(cfg.FFmpegPath)
 	if ferr != nil {
@@ -379,7 +417,8 @@ func handleRun(args []string) (Envelope, int) {
 		return env, exitDependency
 	}
 
-	whisperPath, werr := ensureWhisperPath(ctx, stateDir, cfg.WhisperPath, cfg.WhisperURL, cfg.RuntimeManifestURL, global.MaxRetries)
+	progress.Step("runtime.ensure", "Preparing whisper runtime", nil)
+	whisperPath, werr := ensureWhisperPath(ctx, stateDir, cfg.WhisperPath, cfg.WhisperURL, cfg.RuntimeManifestURL, global.MaxRetries, progress)
 	if werr != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{*werr}
@@ -387,7 +426,8 @@ func handleRun(args []string) (Envelope, int) {
 		return env, exitDependency
 	}
 
-	modelPath, merr := ensureModel(ctx, stateDir, cfg.ModelName, cfg.ModelURL, global.MaxRetries)
+	progress.Step("model.ensure", fmt.Sprintf("Preparing model %s", modelFilename(cfg.ModelName)), map[string]any{"model": modelFilename(cfg.ModelName)})
+	modelPath, merr := ensureModel(ctx, stateDir, cfg.ModelName, cfg.ModelURL, global.MaxRetries, progress)
 	if merr != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{*merr}
@@ -415,6 +455,8 @@ func handleRun(args []string) (Envelope, int) {
 		}
 	}
 
+	progress.Step("run.plan", fmt.Sprintf("Processing %d file(s)", len(files)), map[string]any{"files_total": len(files)})
+
 	llmPath := cfg.LLMPath
 	haveLLM := false
 	if llmPath != "" {
@@ -435,14 +477,29 @@ func handleRun(args []string) (Envelope, int) {
 	var successes int64
 	var failures int64
 
-	for _, media := range files {
-		fr, warns, perr := processMediaFile(ctx, cfg, media, ffmpegPath, whisperPath, modelPath, llmPath, haveLLM, global.Output, env.RunID)
+	for i, media := range files {
+		progress.Step(
+			"file.start",
+			fmt.Sprintf("Processing file %d/%d: %s", i+1, len(files), media),
+			map[string]any{"file": media, "index": i + 1, "total": len(files)},
+		)
+		fr, warns, perr := processMediaFile(ctx, cfg, media, ffmpegPath, whisperPath, modelPath, llmPath, haveLLM, global.Output, env.RunID, progress)
 		runData.Files = append(runData.Files, fr)
 		env.Warnings = append(env.Warnings, warns...)
 		if perr != nil {
 			failures++
+			progress.Step(
+				"file.failed",
+				fmt.Sprintf("Failed file %d/%d: %s", i+1, len(files), media),
+				map[string]any{"file": media, "index": i + 1, "total": len(files), "error_code": perr.Code},
+			)
 		} else {
 			successes++
+			progress.Step(
+				"file.done",
+				fmt.Sprintf("Completed file %d/%d: %s", i+1, len(files), media),
+				map[string]any{"file": media, "index": i + 1, "total": len(files)},
+			)
 		}
 	}
 
@@ -461,6 +518,11 @@ func handleRun(args []string) (Envelope, int) {
 	_ = saveRunRecord(stateDir, env)
 
 	finishEnvelope(&env, started, int64(len(files)), successes, failures)
+	progress.Step(
+		"run.done",
+		fmt.Sprintf("Run finished with status %s (%d succeeded, %d failed)", env.Status, successes, failures),
+		map[string]any{"status": env.Status, "files_succeeded": successes, "files_failed": failures},
+	)
 	return env, exitFromStatus(env.Status)
 }
 
@@ -803,8 +865,10 @@ func handleModelsPull(args []string, started time.Time) (Envelope, int) {
 
 	ctx, cancel := commandContext(global.TimeoutMS)
 	defer cancel()
+	progress := newProgressReporter(global.Output, "models.pull", env.RunID)
+	progress.Step("model.ensure", fmt.Sprintf("Preparing model %s", modelFilename(name)), map[string]any{"model": modelFilename(name)})
 
-	path, merr := ensureModel(ctx, stateDir, name, url, global.MaxRetries)
+	path, merr := ensureModel(ctx, stateDir, name, url, global.MaxRetries, progress)
 	if merr != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{*merr}
@@ -967,6 +1031,7 @@ func processMediaFile(
 	haveLLM bool,
 	outputMode string,
 	runID string,
+	progress *ProgressReporter,
 ) (FileResult, []Warning, *AppError) {
 	warnings := []Warning{}
 	fr := FileResult{File: mediaPath, Status: "failed"}
@@ -978,6 +1043,7 @@ func processMediaFile(
 		return fr, warnings, &ae
 	}
 
+	progress.Step("convert.start", fmt.Sprintf("Converting audio: %s", filepath.Base(absMedia)), map[string]any{"file": absMedia, "sample_rate": cfg.SampleRate})
 	wavPath, convertWarn, cerr := convertToTempWAV(ctx, ffmpegPath, absMedia, cfg.SampleRate, cfg.MonoMode)
 	if convertWarn != nil {
 		warnings = append(warnings, *convertWarn)
@@ -986,12 +1052,13 @@ func processMediaFile(
 		fr.Error = cerr
 		return fr, warnings, cerr
 	}
+	progress.Step("convert.done", fmt.Sprintf("Converted audio: %s", filepath.Base(absMedia)), map[string]any{"file": absMedia})
 	if !cfg.KeepTemp {
 		defer os.Remove(wavPath)
 	}
 
 	transcript := strings.TrimSuffix(absMedia, filepath.Ext(absMedia)) + ".md"
-	terr := transcribeWithWhisper(ctx, whisperPath, modelPath, cfg.Language, wavPath, transcript, cfg.StreamTranscript, cfg.Timestamps, outputMode, runID, absMedia)
+	terr := transcribeWithWhisper(ctx, whisperPath, modelPath, cfg.Language, wavPath, transcript, cfg.StreamTranscript, cfg.Timestamps, outputMode, runID, absMedia, progress)
 	if terr != nil {
 		fr.Error = terr
 		return fr, warnings, terr
@@ -1020,12 +1087,14 @@ func processMediaFile(
 			return fr, warnings, &ae
 		}
 		desc := strings.TrimSuffix(absMedia, filepath.Ext(absMedia)) + "_description.md"
+		progress.Step("description.start", fmt.Sprintf("Generating description: %s", filepath.Base(desc)), map[string]any{"file": absMedia, "prompt": promptPath})
 		dErr := generateDescription(ctx, llmPath, transcript, promptPath, desc)
 		if dErr != nil {
 			fr.Error = dErr
 			return fr, warnings, dErr
 		}
 		fr.Description = desc
+		progress.Step("description.done", fmt.Sprintf("Description written: %s", desc), map[string]any{"file": absMedia, "description": desc})
 	} else {
 		warnings = append(warnings, Warning{Code: "PROMPT_NOT_SET", Message: fmt.Sprintf("No prompt found for %s; description generation skipped", absMedia)})
 	}
@@ -1119,7 +1188,8 @@ func detectAudioChannels(ctx context.Context, ffmpegPath string, input string) (
 	return n, nil
 }
 
-func transcribeWithWhisper(ctx context.Context, whisperPath string, modelPath string, language string, wavPath string, transcriptPath string, stream bool, timestamps bool, outputMode string, runID string, mediaPath string) *AppError {
+func transcribeWithWhisper(ctx context.Context, whisperPath string, modelPath string, language string, wavPath string, transcriptPath string, stream bool, timestamps bool, outputMode string, runID string, mediaPath string, progress *ProgressReporter) *AppError {
+	progress.Step("transcribe.start", fmt.Sprintf("Transcribing: %s", filepath.Base(mediaPath)), map[string]any{"file": mediaPath})
 	baseArgs := []string{
 		"-m", modelPath,
 		"-l", language,
@@ -1151,6 +1221,7 @@ func transcribeWithWhisper(ctx context.Context, whisperPath string, modelPath st
 		if err := os.Rename(textPath, transcriptPath); err != nil {
 			return ptrError(newError("filesystem", "TRANSCRIPT_RENAME_FAILED", err.Error(), true, "Check write permissions in media directory"))
 		}
+		progress.Step("transcribe.done", fmt.Sprintf("Transcript written: %s", transcriptPath), map[string]any{"file": mediaPath, "transcript": transcriptPath})
 		return nil
 	}
 
@@ -1174,12 +1245,20 @@ func transcribeWithWhisper(ctx context.Context, whisperPath string, modelPath st
 	scanner := bufio.NewScanner(stdout)
 	buf := make([]byte, 0, 1024*1024)
 	scanner.Buffer(buf, 10*1024*1024)
+	segmentCount := 0
 	for scanner.Scan() {
 		line := scanner.Text()
 		_, _ = out.WriteString(line)
 		_, _ = out.WriteString("\n")
+		segmentCount++
 		if outputMode == "jsonl" {
 			emitJSONLEvent("run", runID, "transcript.segment", map[string]any{"file": mediaPath, "text": line})
+		} else if segmentCount%20 == 0 {
+			progress.Step(
+				"transcribe.progress",
+				fmt.Sprintf("Transcribing %s: %d segments", filepath.Base(mediaPath), segmentCount),
+				map[string]any{"file": mediaPath, "segments": segmentCount},
+			)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -1188,6 +1267,7 @@ func transcribeWithWhisper(ctx context.Context, whisperPath string, modelPath st
 	if err := cmd.Wait(); err != nil {
 		return ptrError(newError("runtime", "WHISPER_TRANSCRIBE_FAILED", err.Error(), true, trimHint(stderr.String())))
 	}
+	progress.Step("transcribe.done", fmt.Sprintf("Transcript written: %s", transcriptPath), map[string]any{"file": mediaPath, "transcript": transcriptPath})
 	return nil
 }
 
@@ -1236,9 +1316,10 @@ func ensureFFmpegPath(explicit string) (string, *AppError) {
 	return p, nil
 }
 
-func ensureWhisperPath(ctx context.Context, stateDir string, explicitPath string, whisperURL string, runtimeManifestURL string, maxRetries int) (string, *AppError) {
+func ensureWhisperPath(ctx context.Context, stateDir string, explicitPath string, whisperURL string, runtimeManifestURL string, maxRetries int, progress *ProgressReporter) (string, *AppError) {
 	if explicitPath != "" {
 		if fileExists(explicitPath) {
+			progress.Step("runtime.ready", fmt.Sprintf("Using whisper runtime: %s", explicitPath), map[string]any{"path": explicitPath, "source": "flag"})
 			return explicitPath, nil
 		}
 		ae := newError("dependency", "WHISPER_NOT_FOUND", fmt.Sprintf("whisper binary not found at %s", explicitPath), false, "Pass a valid --whisper-path")
@@ -1247,10 +1328,12 @@ func ensureWhisperPath(ctx context.Context, stateDir string, explicitPath string
 
 	runtimePath := filepath.Join(stateDir, "runtime", binaryName("whisper-cli"))
 	if fileExists(runtimePath) {
+		progress.Step("runtime.ready", fmt.Sprintf("Using cached whisper runtime: %s", runtimePath), map[string]any{"path": runtimePath, "source": "cache"})
 		return runtimePath, nil
 	}
 
 	if p, err := exec.LookPath(binaryName("whisper-cli")); err == nil {
+		progress.Step("runtime.ready", fmt.Sprintf("Using whisper runtime from PATH: %s", p), map[string]any{"path": p, "source": "path"})
 		return p, nil
 	}
 
@@ -1266,7 +1349,8 @@ func ensureWhisperPath(ctx context.Context, stateDir string, explicitPath string
 		if manifestURL == "" {
 			manifestURL = defaultRuntimeManifestURL
 		}
-		manifest, err := loadRuntimeManifest(ctx, manifestURL, maxRetries)
+		progress.Step("runtime.manifest", fmt.Sprintf("Resolving runtime asset from manifest: %s", manifestURL), map[string]any{"manifest_url": manifestURL})
+		manifest, err := loadRuntimeManifest(ctx, manifestURL, maxRetries, progress)
 		if err != nil {
 			ae := newError("network", "RUNTIME_MANIFEST_FETCH_FAILED", err.Error(), true, "Set --runtime-manifest-url to a reachable runtime manifest")
 			return "", &ae
@@ -1280,14 +1364,16 @@ func ensureWhisperPath(ctx context.Context, stateDir string, explicitPath string
 		checksum = asset.SHA256
 	}
 
-	if err := downloadAndInstallWhisper(ctx, url, checksum, runtimePath, maxRetries); err != nil {
+	progress.Step("runtime.download", fmt.Sprintf("Installing whisper runtime into %s", runtimePath), map[string]any{"url": url, "path": runtimePath})
+	if err := downloadAndInstallWhisper(ctx, url, checksum, runtimePath, maxRetries, progress); err != nil {
 		ae := newError("dependency", "WHISPER_BOOTSTRAP_FAILED", err.Error(), true, "Set --whisper-url or --runtime-manifest-url to valid runtime sources")
 		return "", &ae
 	}
+	progress.Step("runtime.ready", fmt.Sprintf("Whisper runtime installed at %s", runtimePath), map[string]any{"path": runtimePath, "source": "download"})
 	return runtimePath, nil
 }
 
-func loadRuntimeManifest(ctx context.Context, manifestURL string, maxRetries int) (RuntimeManifest, error) {
+func loadRuntimeManifest(ctx context.Context, manifestURL string, maxRetries int, progress *ProgressReporter) (RuntimeManifest, error) {
 	tmp, err := os.CreateTemp("", "scriby-runtime-manifest-*.json")
 	if err != nil {
 		return RuntimeManifest{}, err
@@ -1296,7 +1382,7 @@ func loadRuntimeManifest(ctx context.Context, manifestURL string, maxRetries int
 	_ = tmp.Close()
 	defer os.Remove(tmpPath)
 
-	if err := downloadFile(ctx, manifestURL, tmpPath, maxRetries); err != nil {
+	if err := downloadFile(ctx, manifestURL, tmpPath, maxRetries, progress, "runtime-manifest.json"); err != nil {
 		return RuntimeManifest{}, err
 	}
 
@@ -1348,7 +1434,7 @@ func normalizeArch(arch string) string {
 	}
 }
 
-func ensureModel(ctx context.Context, stateDir string, modelName string, modelURL string, maxRetries int) (string, *AppError) {
+func ensureModel(ctx context.Context, stateDir string, modelName string, modelURL string, maxRetries int, progress *ProgressReporter) (string, *AppError) {
 	if modelName == "" {
 		modelName = defaultModelName
 	}
@@ -1360,6 +1446,7 @@ func ensureModel(ctx context.Context, stateDir string, modelName string, modelUR
 
 	target := filepath.Join(modelsDir, modelFilename(modelName))
 	if fileExists(target) {
+		progress.Step("model.ready", fmt.Sprintf("Using cached model: %s", target), map[string]any{"model": modelFilename(modelName), "path": target, "source": "cache"})
 		return target, nil
 	}
 
@@ -1374,7 +1461,8 @@ func ensureModel(ctx context.Context, stateDir string, modelName string, modelUR
 	}
 
 	tmp := target + ".tmp"
-	if err := downloadFile(ctx, url, tmp, maxRetries); err != nil {
+	progress.Step("model.download", fmt.Sprintf("Downloading model %s", modelFilename(modelName)), map[string]any{"model": modelFilename(modelName), "url": url})
+	if err := downloadFile(ctx, url, tmp, maxRetries, progress, modelFilename(modelName)); err != nil {
 		ae := newError("network", "MODEL_DOWNLOAD_FAILED", err.Error(), true, "Check network, model URL, or use --model-url")
 		return "", &ae
 	}
@@ -1386,10 +1474,11 @@ func ensureModel(ctx context.Context, stateDir string, modelName string, modelUR
 	if err := os.Chmod(target, 0o644); err != nil {
 		// Non-fatal on some filesystems.
 	}
+	progress.Step("model.ready", fmt.Sprintf("Model ready: %s", target), map[string]any{"model": modelFilename(modelName), "path": target, "source": "download"})
 	return target, nil
 }
 
-func downloadAndInstallWhisper(ctx context.Context, url string, expectedSHA256 string, destBinaryPath string, maxRetries int) error {
+func downloadAndInstallWhisper(ctx context.Context, url string, expectedSHA256 string, destBinaryPath string, maxRetries int, progress *ProgressReporter) error {
 	tmp, err := os.CreateTemp("", "scriby-whisper-*")
 	if err != nil {
 		return err
@@ -1398,7 +1487,7 @@ func downloadAndInstallWhisper(ctx context.Context, url string, expectedSHA256 s
 	_ = tmp.Close()
 	defer os.Remove(tmpPath)
 
-	if err := downloadFile(ctx, url, tmpPath, maxRetries); err != nil {
+	if err := downloadFile(ctx, url, tmpPath, maxRetries, progress, "whisper-runtime"); err != nil {
 		return err
 	}
 
@@ -1432,15 +1521,25 @@ func downloadAndInstallWhisper(ctx context.Context, url string, expectedSHA256 s
 	return nil
 }
 
-func downloadFile(ctx context.Context, url string, dest string, maxRetries int) error {
+func downloadFile(ctx context.Context, url string, dest string, maxRetries int, progress *ProgressReporter, artifactLabel string) error {
 	if maxRetries < 0 {
 		maxRetries = 0
+	}
+
+	label := strings.TrimSpace(artifactLabel)
+	if label == "" {
+		label = downloadLabel(url)
 	}
 
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(attempt*250) * time.Millisecond
+			progress.Step(
+				"download.retry",
+				fmt.Sprintf("Retrying download for %s (attempt %d/%d)", label, attempt+1, maxRetries+1),
+				map[string]any{"artifact": label, "attempt": attempt + 1, "max_attempts": maxRetries + 1},
+			)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -1453,6 +1552,7 @@ func downloadFile(ctx context.Context, url string, dest string, maxRetries int) 
 			return err
 		}
 		req.Header.Set("User-Agent", "scriby-cli/1.0")
+		progress.Step("download.start", fmt.Sprintf("Downloading %s", label), map[string]any{"artifact": label, "url": url, "attempt": attempt + 1, "max_attempts": maxRetries + 1})
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -1470,7 +1570,52 @@ func downloadFile(ctx context.Context, url string, dest string, maxRetries int) 
 			_ = resp.Body.Close()
 			return err
 		}
-		_, copyErr := io.Copy(f, resp.Body)
+
+		total := resp.ContentLength
+		var downloaded int64
+		lastProgressBucket := int64(-1)
+		buffer := make([]byte, 64*1024)
+		copyErr := error(nil)
+		for {
+			n, readErr := resp.Body.Read(buffer)
+			if n > 0 {
+				if _, writeErr := f.Write(buffer[:n]); writeErr != nil {
+					copyErr = writeErr
+					break
+				}
+				downloaded += int64(n)
+
+				if total > 0 {
+					percent := (downloaded * 100) / total
+					if percent > 100 {
+						percent = 100
+					}
+					bucket := percent / 10
+					if bucket != lastProgressBucket {
+						lastProgressBucket = bucket
+						progress.Step(
+							"download.progress",
+							fmt.Sprintf("Downloading %s: %d%% (%s/%s)", label, percent, humanBytes(downloaded), humanBytes(total)),
+							map[string]any{"artifact": label, "url": url, "downloaded_bytes": downloaded, "total_bytes": total, "percent": percent},
+						)
+					}
+				} else if downloaded%(5*1024*1024) < int64(n) {
+					progress.Step(
+						"download.progress",
+						fmt.Sprintf("Downloading %s: %s", label, humanBytes(downloaded)),
+						map[string]any{"artifact": label, "url": url, "downloaded_bytes": downloaded},
+					)
+				}
+			}
+
+			if readErr != nil {
+				if errors.Is(readErr, io.EOF) {
+					break
+				}
+				copyErr = readErr
+				break
+			}
+		}
 		closeErr := resp.Body.Close()
 		_ = f.Close()
 		if copyErr != nil {
@@ -1481,6 +1626,11 @@ func downloadFile(ctx context.Context, url string, dest string, maxRetries int) 
 			lastErr = closeErr
 			continue
 		}
+		progress.Step(
+			"download.done",
+			fmt.Sprintf("Downloaded %s (%s)", label, humanBytes(downloaded)),
+			map[string]any{"artifact": label, "url": url, "downloaded_bytes": downloaded},
+		)
 		return nil
 	}
 	if lastErr == nil {
@@ -1804,6 +1954,36 @@ func emitJSONLEvent(command string, runID string, event string, data map[string]
 	fmt.Fprintln(os.Stdout, string(b))
 }
 
+func downloadLabel(rawURL string) string {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return "artifact"
+	}
+	withoutQuery := strings.SplitN(trimmed, "?", 2)[0]
+	base := filepath.Base(withoutQuery)
+	if base == "" || base == "." || base == "/" {
+		return "artifact"
+	}
+	return base
+}
+
+func humanBytes(n int64) string {
+	if n <= 0 {
+		return "0 B"
+	}
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
+	size := float64(n)
+	unitIdx := 0
+	for size >= 1024 && unitIdx < len(units)-1 {
+		size /= 1024
+		unitIdx++
+	}
+	if unitIdx == 0 {
+		return fmt.Sprintf("%d %s", n, units[unitIdx])
+	}
+	return fmt.Sprintf("%.1f %s", size, units[unitIdx])
+}
+
 func finishEnvelope(env *Envelope, started time.Time, total int64, succeeded int64, failed int64) {
 	env.Metrics["duration_ms"] = time.Since(started).Milliseconds()
 	if total > 0 {
@@ -2028,7 +2208,7 @@ Run Flags:
   --keep-temp               Keep intermediate WAV files
 
 Global Flags:
-  --output json|jsonl|text
+  --output json|jsonl|text  (jsonl streams progress/events; json/text print progress to stderr)
   --strict
   --non-interactive
   --yes

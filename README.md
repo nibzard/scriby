@@ -2,27 +2,77 @@
 
 AI-native CLI for media transcription with `whisper-cli`, optional description generation via `llm`, and deterministic machine-parseable output.
 
-## Quick Start
+## Install from GitHub Release (recommended)
 
-Build:
+Releases:
+
+`https://github.com/nibzard/scriby/releases`
+
+Quick install (macOS/Linux):
+
+```bash
+VERSION="v0.1.0"
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64) ARCH="amd64" ;;
+  arm64|aarch64) ARCH="arm64" ;;
+esac
+
+curl -L -o /tmp/scriby.tar.gz "https://github.com/nibzard/scriby/releases/download/${VERSION}/scriby-${VERSION}-${OS}-${ARCH}.tar.gz"
+tar -xzf /tmp/scriby.tar.gz -C /tmp
+sudo install /tmp/scriby /usr/local/bin/scriby
+scriby --help
+```
+
+macOS Apple Silicon (`arm64`) direct example:
+
+```bash
+curl -L -o /tmp/scriby.tar.gz "https://github.com/nibzard/scriby/releases/download/v0.1.0/scriby-v0.1.0-darwin-arm64.tar.gz"
+tar -xzf /tmp/scriby.tar.gz -C /tmp
+sudo install /tmp/scriby /usr/local/bin/scriby
+scriby --help
+```
+
+## Quickstart (first setup + first run)
+
+Prerequisite:
+
+```bash
+ffmpeg -version
+```
+
+First run (downloads Whisper runtime + model automatically):
+
+```bash
+scriby run \
+  --model medium \
+  --language en \
+  --stream-transcript=false \
+  /path/to/audio-or-video-file
+```
+
+What happens on first run:
+
+- Scriby installs `whisper-cli` to `~/Library/Caches/scriby/runtime` on macOS.
+- Scriby downloads the selected model to `~/Library/Caches/scriby/models`.
+- Transcript is written next to your input file as `<name>.md`.
+
+Example:
+
+```bash
+scriby run --model medium --language en --stream-transcript=false ./meeting.wav
+```
+
+## Build from source
 
 ```bash
 make build
-```
-
-Run:
-
-```bash
 ./scriby run /path/to/file-or-directory
-```
-
-Validate only:
-
-```bash
 ./scriby validate /path/to/file-or-directory
 ```
 
-## Release And Runtime Packaging
+## Release and runtime packaging
 
 Scriby release binaries:
 
@@ -49,7 +99,7 @@ GitHub Actions workflows:
 - `.github/workflows/release.yml` publishes Scriby CLI assets on `v*` tags.
 - `.github/workflows/runtime-release.yml` builds `whisper-cli` matrix artifacts, generates `runtime-manifest.json`, and publishes runtime assets.
 
-## Runtime Bootstrap Source
+## Runtime bootstrap source
 
 By default, Scriby resolves runtime assets from:
 
