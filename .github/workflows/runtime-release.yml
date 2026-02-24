@@ -111,10 +111,14 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           for artifact_dir in runtime/bin/runtime-*; do
+            artifact_name="$(basename "$artifact_dir")"
+            platform="${artifact_name#runtime-}"
+            os="${platform%-*}"
+            arch="${platform##*-}"
+            target_dir="runtime/bin/${os}_${arch}"
+            mkdir -p "$target_dir"
             while IFS= read -r -d '' binary; do
-              platform_dir="$(basename "$(dirname "$binary")")"
-              mkdir -p "runtime/bin/${platform_dir}"
-              mv "$binary" "runtime/bin/${platform_dir}/"
+              mv "$binary" "$target_dir/"
             done < <(find "$artifact_dir" -type f \( -name 'whisper-cli' -o -name 'whisper-cli.exe' \) -print0)
             rm -rf "$artifact_dir"
           done
