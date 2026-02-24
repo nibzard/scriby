@@ -50,11 +50,11 @@ jobs:
 
       - name: Configure (Unix)
         if: matrix.os != 'windows' && !(matrix.os == 'darwin' && matrix.arch == 'amd64')
-        run: cmake -S whisper.cpp -B whisper.cpp/build -DWHISPER_BUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S whisper.cpp -B whisper.cpp/build -DWHISPER_BUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF
 
       - name: Configure (Unix darwin amd64)
         if: matrix.os == 'darwin' && matrix.arch == 'amd64'
-        run: cmake -S whisper.cpp -B whisper.cpp/build -DWHISPER_BUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64 -DGGML_NATIVE=OFF
+        run: cmake -S whisper.cpp -B whisper.cpp/build -DWHISPER_BUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64 -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF
 
       - name: Build whisper-cli (Unix)
         if: matrix.os != 'windows'
@@ -63,7 +63,7 @@ jobs:
       - name: Configure (Windows)
         if: matrix.os == 'windows'
         shell: pwsh
-        run: cmake -S whisper.cpp -B whisper.cpp/build -DWHISPER_BUILD_EXAMPLES=ON -A x64
+        run: cmake -S whisper.cpp -B whisper.cpp/build -DWHISPER_BUILD_EXAMPLES=ON -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -A x64
 
       - name: Build whisper-cli (Windows)
         if: matrix.os == 'windows'
