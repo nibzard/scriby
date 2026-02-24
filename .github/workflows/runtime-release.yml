@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Runtime release tag (for example v0.1.0)'
+        description: 'Runtime release tag (for example v0.1.1)'
         required: true
         type: string
       whisper_ref:

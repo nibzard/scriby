@@ -29,7 +29,7 @@ const (
 	schemaVersion            = "1.0"
 	defaultModelName         = "medium"
 	defaultModelURLMedium    = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
-	defaultRuntimeManifestURL = "https://github.com/nibzard/scriby/releases/download/v0.1.0/runtime-manifest.json"
+	defaultRuntimeManifestURL = "https://github.com/nibzard/scriby/releases/download/v0.1.1/runtime-manifest.json"
 
 	exitOK         = 0
 	exitInput      = 2
