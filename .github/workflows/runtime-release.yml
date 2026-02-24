@@ -1,0 +1,136 @@
+name: runtime-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Runtime release tag (for example v0.1.0)'
+        required: true
+        type: string
+      whisper_ref:
+        description: 'whisper.cpp git ref to build from'
+        required: true
+        default: master
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-whisper:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-24.04
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - os: darwin
+            arch: amd64
+            runner: macos-13
+          - os: darwin
+            arch: arm64
+            runner: macos-14
+          - os: windows
+            arch: amd64
+            runner: windows-2022
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout whisper.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ggerganov/whisper.cpp
+          ref: ${{ github.event.inputs.whisper_ref }}
+          path: whisper.cpp
+
+      - name: Configure (Unix)
+        if: matrix.os != 'windows'
+        run: cmake -S whisper.cpp -B whisper.cpp/build -DWHISPER_BUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build whisper-cli (Unix)
+        if: matrix.os != 'windows'
+        run: cmake --build whisper.cpp/build --config Release --target whisper-cli --parallel
+
+      - name: Configure (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: cmake -S whisper.cpp -B whisper.cpp/build -DWHISPER_BUILD_EXAMPLES=ON -A x64
+
+      - name: Build whisper-cli (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: cmake --build whisper.cpp/build --config Release --target whisper-cli
+
+      - name: Collect runtime binary (Unix)
+        if: matrix.os != 'windows'
+        run: |
+          mkdir -p runtime/bin/${{ matrix.os }}_${{ matrix.arch }}
+          cp whisper.cpp/build/bin/whisper-cli runtime/bin/${{ matrix.os }}_${{ matrix.arch }}/whisper-cli
+          chmod +x runtime/bin/${{ matrix.os }}_${{ matrix.arch }}/whisper-cli
+
+      - name: Collect runtime binary (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path runtime/bin/${{ matrix.os }}_${{ matrix.arch }} | Out-Null
+          Copy-Item whisper.cpp/build/bin/Release/whisper-cli.exe runtime/bin/${{ matrix.os }}_${{ matrix.arch }}/whisper-cli.exe
+
+      - name: Upload runtime binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.os }}-${{ matrix.arch }}
+          path: runtime/bin/${{ matrix.os }}_${{ matrix.arch }}
+
+  package-runtime:
+    needs: build-whisper
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-*
+          path: runtime/bin
+          merge-multiple: false
+
+      - name: Normalize runtime artifact layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for artifact_dir in runtime/bin/runtime-*; do
+            while IFS= read -r -d '' binary; do
+              platform_dir="$(basename "$(dirname "$binary")")"
+              mkdir -p "runtime/bin/${platform_dir}"
+              mv "$binary" "runtime/bin/${platform_dir}/"
+            done < <(find "$artifact_dir" -type f \( -name 'whisper-cli' -o -name 'whisper-cli.exe' \) -print0)
+            rm -rf "$artifact_dir"
+          done
+
+      - name: Package runtime assets and manifest
+        shell: bash
+        run: |
+          ./scripts/package-runtime-assets.sh \
+            "${{ github.event.inputs.version }}" \
+            "dist/runtime" \
+            "https://github.com/nibzard/scriby/releases/download/${{ github.event.inputs.version }}"
+
+      - name: Upload packaged runtime assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-dist-${{ github.event.inputs.version }}
+          path: dist/runtime
+
+      - name: Publish runtime release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          files: dist/runtime/*

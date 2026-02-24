@@ -1,0 +1,9 @@
+# Build outputs
+scriby
+dist/
+
+# Runtime local build staging
+runtime/bin/
+
+# OS/editor noise
+.DS_Store

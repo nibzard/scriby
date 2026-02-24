@@ -1,0 +1,50 @@
+{
+  "version": "v0.1.0",
+  "assets": [
+    {
+      "name": "whisper-cli",
+      "os": "darwin",
+      "arch": "amd64",
+      "format": "tar.gz",
+      "binary": "whisper-cli",
+      "url": "https://github.com/nibzard/scriby/releases/download/v0.1.0/whisper-cli-darwin-amd64.tar.gz",
+      "sha256": "REPLACE_WITH_SHA256"
+    },
+    {
+      "name": "whisper-cli",
+      "os": "darwin",
+      "arch": "arm64",
+      "format": "tar.gz",
+      "binary": "whisper-cli",
+      "url": "https://github.com/nibzard/scriby/releases/download/v0.1.0/whisper-cli-darwin-arm64.tar.gz",
+      "sha256": "REPLACE_WITH_SHA256"
+    },
+    {
+      "name": "whisper-cli",
+      "os": "linux",
+      "arch": "amd64",
+      "format": "tar.gz",
+      "binary": "whisper-cli",
+      "url": "https://github.com/nibzard/scriby/releases/download/v0.1.0/whisper-cli-linux-amd64.tar.gz",
+      "sha256": "REPLACE_WITH_SHA256"
+    },
+    {
+      "name": "whisper-cli",
+      "os": "linux",
+      "arch": "arm64",
+      "format": "tar.gz",
+      "binary": "whisper-cli",
+      "url": "https://github.com/nibzard/scriby/releases/download/v0.1.0/whisper-cli-linux-arm64.tar.gz",
+      "sha256": "REPLACE_WITH_SHA256"
+    },
+    {
+      "name": "whisper-cli",
+      "os": "windows",
+      "arch": "amd64",
+      "format": "zip",
+      "binary": "whisper-cli.exe",
+      "url": "https://github.com/nibzard/scriby/releases/download/v0.1.0/whisper-cli-windows-amd64.zip",
+      "sha256": "REPLACE_WITH_SHA256"
+    }
+  ]
+}
