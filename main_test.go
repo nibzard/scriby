@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -36,6 +39,18 @@ func TestNormalizeArch(t *testing.T) {
 	}
 	if got := normalizeArch("arm64"); got != "arm64" {
 		t.Fatalf("normalizeArch(arm64) = %q, want arm64", got)
+	}
+}
+
+func TestDefaultClipboardAndInteractivity(t *testing.T) {
+	runCfg := defaultRunConfig()
+	if runCfg.Clipboard != "ask" {
+		t.Fatalf("defaultRunConfig().Clipboard = %q, want ask", runCfg.Clipboard)
+	}
+
+	global := defaultGlobalOptions()
+	if global.NonInteractive {
+		t.Fatal("defaultGlobalOptions().NonInteractive = true, want false")
 	}
 }
 
@@ -138,5 +153,243 @@ func TestListInputFilesDirectoryIncludesMOV(t *testing.T) {
 		if files[i] != want[i] {
 			t.Fatalf("listInputFiles(%q)[%d] = %q, want %q", dir, i, files[i], want[i])
 		}
+	}
+}
+
+func TestValidateRunInputsInvalidClipboardMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "meeting.wav")
+	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	cfg := defaultRunConfig()
+	cfg.Input = path
+	cfg.Clipboard = "sometimes"
+
+	_, err := validateRunInputs(cfg)
+	if err == nil {
+		t.Fatal("validateRunInputs should fail for invalid clipboard mode")
+	}
+	if err.Code != "INVALID_CLIPBOARD_MODE" {
+		t.Fatalf("error code = %s, want INVALID_CLIPBOARD_MODE", err.Code)
+	}
+}
+
+func TestClipboardTranscriptPath(t *testing.T) {
+	path, warn := clipboardTranscriptPath([]FileResult{
+		{File: "one.mov", Transcript: "/tmp/one.md", Status: "succeeded"},
+	})
+	if warn != nil {
+		t.Fatalf("unexpected warning: %#v", warn)
+	}
+	if path != "/tmp/one.md" {
+		t.Fatalf("clipboardTranscriptPath returned %q, want /tmp/one.md", path)
+	}
+
+	path, warn = clipboardTranscriptPath([]FileResult{
+		{File: "one.mov", Transcript: "/tmp/one.md", Status: "succeeded"},
+		{File: "two.mov", Transcript: "/tmp/two.md", Status: "succeeded"},
+	})
+	if path != "" {
+		t.Fatalf("clipboardTranscriptPath returned %q, want empty path", path)
+	}
+	if warn == nil || warn.Code != "CLIPBOARD_SKIPPED_MULTIPLE_TRANSCRIPTS" {
+		t.Fatalf("expected CLIPBOARD_SKIPPED_MULTIPLE_TRANSCRIPTS, got %#v", warn)
+	}
+}
+
+func TestPromptYesNo(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "yes", input: "yes\n", want: true},
+		{name: "short yes", input: "y\n", want: true},
+		{name: "no", input: "n\n", want: false},
+		{name: "empty", input: "", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			got, err := promptYesNo(strings.NewReader(tt.input), &out, "Copy? ")
+			if err != nil {
+				t.Fatalf("promptYesNo returned error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("promptYesNo(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+			if out.String() != "Copy? " {
+				t.Fatalf("prompt output = %q, want %q", out.String(), "Copy? ")
+			}
+		})
+	}
+}
+
+func TestClipboardCommandFor(t *testing.T) {
+	lookPath := func(paths map[string]string) func(string) (string, error) {
+		return func(name string) (string, error) {
+			if path, ok := paths[name]; ok {
+				return path, nil
+			}
+			return "", fmt.Errorf("%s not found", name)
+		}
+	}
+	getenv := func(values map[string]string) func(string) string {
+		return func(key string) string {
+			return values[key]
+		}
+	}
+
+	tests := []struct {
+		name     string
+		goos     string
+		env      map[string]string
+		paths    map[string]string
+		wantPath string
+		wantArgs []string
+		wantErr  string
+	}{
+		{
+			name:     "darwin pbcopy",
+			goos:     "darwin",
+			paths:    map[string]string{"pbcopy": "/usr/bin/pbcopy"},
+			wantPath: "/usr/bin/pbcopy",
+		},
+		{
+			name:     "windows clip",
+			goos:     "windows",
+			paths:    map[string]string{"clip.exe": "C:\\Windows\\System32\\clip.exe"},
+			wantPath: "C:\\Windows\\System32\\clip.exe",
+		},
+		{
+			name:     "linux wayland wl-copy",
+			goos:     "linux",
+			env:      map[string]string{"WAYLAND_DISPLAY": "wayland-1"},
+			paths:    map[string]string{"wl-copy": "/usr/bin/wl-copy"},
+			wantPath: "/usr/bin/wl-copy",
+		},
+		{
+			name:     "linux xclip fallback",
+			goos:     "linux",
+			paths:    map[string]string{"xclip": "/usr/bin/xclip"},
+			wantPath: "/usr/bin/xclip",
+			wantArgs: []string{"-selection", "clipboard"},
+		},
+		{
+			name:    "linux unavailable",
+			goos:    "linux",
+			paths:   map[string]string{},
+			wantErr: "clipboard unavailable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd, err := clipboardCommandFor(tt.goos, getenv(tt.env), lookPath(tt.paths))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("clipboardCommandFor error = %v, want substring %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("clipboardCommandFor returned error: %v", err)
+			}
+			if cmd.Path != tt.wantPath {
+				t.Fatalf("cmd.Path = %q, want %q", cmd.Path, tt.wantPath)
+			}
+			if strings.Join(cmd.Args, " ") != strings.Join(tt.wantArgs, " ") {
+				t.Fatalf("cmd.Args = %#v, want %#v", cmd.Args, tt.wantArgs)
+			}
+		})
+	}
+}
+
+func TestSplitRootArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantLeading []string
+		wantRest    []string
+		wantHelp    bool
+		wantErr     string
+	}{
+		{
+			name:        "command first",
+			args:        []string{"run", "--help"},
+			wantLeading: []string{},
+			wantRest:    []string{"run", "--help"},
+		},
+		{
+			name:        "leading global flags",
+			args:        []string{"--output", "text", "--non-interactive", "run", "clip.wav"},
+			wantLeading: []string{"--output", "text", "--non-interactive"},
+			wantRest:    []string{"run", "clip.wav"},
+		},
+		{
+			name:        "root help with output",
+			args:        []string{"--output=json", "--help"},
+			wantLeading: []string{"--output=json", "--help"},
+			wantRest:    nil,
+			wantHelp:    true,
+		},
+		{
+			name:    "unknown leading flag",
+			args:    []string{"--bogus", "run"},
+			wantErr: "flag provided but not defined: -bogus",
+		},
+		{
+			name:    "missing flag value",
+			args:    []string{"--output"},
+			wantErr: "flag needs an argument: --output",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotLeading, gotRest, gotHelp, err := splitRootArgs(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("splitRootArgs(%q) error = %v, want %q", tt.args, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("splitRootArgs(%q) returned error: %v", tt.args, err)
+			}
+			if fmt.Sprintf("%q", gotLeading) != fmt.Sprintf("%q", tt.wantLeading) {
+				t.Fatalf("leading = %q, want %q", gotLeading, tt.wantLeading)
+			}
+			if fmt.Sprintf("%q", gotRest) != fmt.Sprintf("%q", tt.wantRest) {
+				t.Fatalf("rest = %q, want %q", gotRest, tt.wantRest)
+			}
+			if gotHelp != tt.wantHelp {
+				t.Fatalf("help = %v, want %v", gotHelp, tt.wantHelp)
+			}
+		})
+	}
+}
+
+func TestOutputPreference(t *testing.T) {
+	t.Setenv("SCRIBY_OUTPUT", "")
+
+	mode, source := outputPreference([]string{"--output", "text", "run"})
+	if mode != "text" || source != "flag" {
+		t.Fatalf("outputPreference flag = (%q, %q), want (text, flag)", mode, source)
+	}
+
+	t.Setenv("SCRIBY_OUTPUT", "jsonl")
+	mode, source = outputPreference([]string{"run"})
+	if mode != "jsonl" || source != "env" {
+		t.Fatalf("outputPreference env = (%q, %q), want (jsonl, env)", mode, source)
+	}
+
+	t.Setenv("SCRIBY_OUTPUT", "")
+	mode, source = outputPreference([]string{"run"})
+	if mode != "json" || source != "default" {
+		t.Fatalf("outputPreference default = (%q, %q), want (json, default)", mode, source)
 	}
 }

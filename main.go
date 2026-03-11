@@ -26,10 +26,10 @@ import (
 )
 
 const (
-	schemaVersion            = "1.0"
-	defaultModelName         = "medium"
-	defaultModelURLMedium    = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
-	defaultRuntimeManifestURL = "https://github.com/nibzard/scriby/releases/download/v0.1.1/runtime-manifest.json"
+	schemaVersion             = "1.0"
+	defaultModelName          = "medium"
+	defaultModelURLMedium     = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
+	defaultRuntimeManifestURL = "https://github.com/nibzard/scriby/releases/download/v0.1.2/runtime-manifest.json"
 
 	exitOK         = 0
 	exitInput      = 2
@@ -86,21 +86,22 @@ type GlobalOptions struct {
 }
 
 type RunConfig struct {
-	Input            string
-	Prompt           string
-	MonoMode         string
-	SampleRate       int
-	Timestamps       bool
-	Language         string
-	StreamTranscript bool
-	ModelName        string
-	ModelURL         string
-	WhisperPath      string
-	WhisperURL       string
+	Input              string
+	Prompt             string
+	Clipboard          string
+	MonoMode           string
+	SampleRate         int
+	Timestamps         bool
+	Language           string
+	StreamTranscript   bool
+	ModelName          string
+	ModelURL           string
+	WhisperPath        string
+	WhisperURL         string
 	RuntimeManifestURL string
-	FFmpegPath       string
-	LLMPath          string
-	KeepTemp         bool
+	FFmpegPath         string
+	LLMPath            string
+	KeepTemp           bool
 }
 
 type RuntimeManifest struct {
@@ -178,44 +179,61 @@ type DoctorCheck struct {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stdout, rootHelp())
+	leadingGlobalArgs, remainingArgs, rootHelp, rootParseErr := splitRootArgs(os.Args[1:])
+	if rootParseErr != nil {
+		env := newEnvelope("root")
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", rootParseErr.Error(), false, "Run 'scriby --help' for usage")}
+		finishEnvelope(&env, time.Now(), 0, 0, 0)
+		_ = printCommandResult(env, os.Args[1:])
 		os.Exit(exitInput)
 	}
 
-	command := os.Args[1]
-	args := os.Args[2:]
+	if len(remainingArgs) < 1 {
+		if rootHelp {
+			env := rootHelpEnvelope()
+			_ = printCommandResult(env, leadingGlobalArgs)
+			os.Exit(exitOK)
+		}
+		env := rootMissingCommandEnvelope()
+		_ = printCommandResult(env, leadingGlobalArgs)
+		os.Exit(exitInput)
+	}
+
+	command := remainingArgs[0]
+	args := append(append([]string{}, leadingGlobalArgs...), remainingArgs[1:]...)
 
 	switch command {
 	case "help", "-h", "--help":
-		fmt.Fprint(os.Stdout, rootHelp())
+		env := rootHelpEnvelope()
+		_ = printCommandResult(env, args)
 		os.Exit(exitOK)
 	case "run":
 		env, code := handleRun(args)
-		_ = printEnvelope(env, guessOutput(args))
+		_ = printCommandResult(env, args)
 		os.Exit(code)
 	case "validate":
 		env, code := handleValidate(args)
-		_ = printEnvelope(env, guessOutput(args))
+		_ = printCommandResult(env, args)
 		os.Exit(code)
 	case "doctor":
 		env, code := handleDoctor(args)
-		_ = printEnvelope(env, guessOutput(args))
+		_ = printCommandResult(env, args)
 		os.Exit(code)
 	case "replay":
 		env, code := handleReplay(args)
-		_ = printEnvelope(env, guessOutput(args))
+		_ = printCommandResult(env, args)
 		os.Exit(code)
 	case "models":
 		env, code := handleModels(args)
-		_ = printEnvelope(env, guessOutput(args))
+		_ = printCommandResult(env, args)
 		os.Exit(code)
 	default:
 		env := newEnvelope("root")
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "UNKNOWN_COMMAND", fmt.Sprintf("unknown command: %s", command), false, "Use 'scriby help' to list commands")}
 		env.Metrics["duration_ms"] = int64(0)
-		_ = printEnvelope(env, guessOutput(args))
+		_ = printCommandResult(env, args)
 		os.Exit(exitInput)
 	}
 }
@@ -246,6 +264,21 @@ Examples:
 `
 }
 
+func rootHelpEnvelope() Envelope {
+	env := newEnvelope("root")
+	env.Data = rootHelp()
+	finishEnvelope(&env, time.Now(), 0, 0, 0)
+	return env
+}
+
+func rootMissingCommandEnvelope() Envelope {
+	env := newEnvelope("root")
+	env.Status = "failed"
+	env.Errors = []AppError{newError("input", "MISSING_COMMAND", "missing required <command>", false, "Use 'scriby --help' to list commands")}
+	finishEnvelope(&env, time.Now(), 0, 0, 0)
+	return env
+}
+
 func newEnvelope(command string) Envelope {
 	return Envelope{
 		SchemaVersion: schemaVersion,
@@ -260,7 +293,7 @@ func defaultGlobalOptions() GlobalOptions {
 	return GlobalOptions{
 		Output:         envOr("SCRIBY_OUTPUT", "json"),
 		Strict:         envBool("SCRIBY_STRICT", false),
-		NonInteractive: envBool("SCRIBY_NON_INTERACTIVE", true),
+		NonInteractive: envBool("SCRIBY_NON_INTERACTIVE", false),
 		Yes:            envBool("SCRIBY_YES", false),
 		TimeoutMS:      envInt("SCRIBY_TIMEOUT_MS", 0),
 		MaxRetries:     envInt("SCRIBY_MAX_RETRIES", 2),
@@ -273,19 +306,20 @@ func defaultGlobalOptions() GlobalOptions {
 
 func defaultRunConfig() RunConfig {
 	return RunConfig{
-		MonoMode:         envOr("SCRIBE_MONO_MODE", "average"),
-		SampleRate:       envInt("SCRIBE_SAMPLE_RATE", 16000),
-		Timestamps:       envBool("SCRIBE_WITH_TIMESTAMPS", false),
-		Language:         envOr("WHISPER_LANGUAGE", "en"),
-		StreamTranscript: envBool("SCRIBE_STREAM_TRANSCRIPT", true),
-		ModelName:        envOr("SCRIBY_MODEL", defaultModelName),
-		ModelURL:         envOr("SCRIBY_MODEL_URL", ""),
-		WhisperPath:      envOr("SCRIBY_WHISPER_PATH", ""),
-		WhisperURL:       envOr("SCRIBY_WHISPER_URL", ""),
+		Clipboard:          envOr("SCRIBY_CLIPBOARD", "ask"),
+		MonoMode:           envOr("SCRIBE_MONO_MODE", "average"),
+		SampleRate:         envInt("SCRIBE_SAMPLE_RATE", 16000),
+		Timestamps:         envBool("SCRIBE_WITH_TIMESTAMPS", false),
+		Language:           envOr("WHISPER_LANGUAGE", "en"),
+		StreamTranscript:   envBool("SCRIBE_STREAM_TRANSCRIPT", true),
+		ModelName:          envOr("SCRIBY_MODEL", defaultModelName),
+		ModelURL:           envOr("SCRIBY_MODEL_URL", ""),
+		WhisperPath:        envOr("SCRIBY_WHISPER_PATH", ""),
+		WhisperURL:         envOr("SCRIBY_WHISPER_URL", ""),
 		RuntimeManifestURL: envOr("SCRIBY_RUNTIME_MANIFEST_URL", defaultRuntimeManifestURL),
-		FFmpegPath:       envOr("SCRIBY_FFMPEG_PATH", ""),
-		LLMPath:          envOr("SCRIBY_LLM_PATH", "llm"),
-		KeepTemp:         envBool("SCRIBY_KEEP_TEMP", false),
+		FFmpegPath:         envOr("SCRIBY_FFMPEG_PATH", ""),
+		LLMPath:            envOr("SCRIBY_LLM_PATH", "llm"),
+		KeepTemp:           envBool("SCRIBY_KEEP_TEMP", false),
 	}
 }
 
@@ -304,6 +338,7 @@ func addGlobalFlags(fs *flag.FlagSet, g *GlobalOptions) {
 
 func addRunFlags(fs *flag.FlagSet, cfg *RunConfig) {
 	fs.StringVar(&cfg.Prompt, "prompt", cfg.Prompt, "Prompt file for description generation")
+	fs.StringVar(&cfg.Clipboard, "clipboard", cfg.Clipboard, "Clipboard behavior: never|ask|always")
 	fs.StringVar(&cfg.MonoMode, "mono-mode", cfg.MonoMode, "Mono channel strategy: left|right|average")
 	fs.IntVar(&cfg.SampleRate, "sample-rate", cfg.SampleRate, "Sample rate for converted WAV")
 	fs.BoolVar(&cfg.Timestamps, "timestamps", cfg.Timestamps, "Include timestamps in transcript output")
@@ -319,6 +354,17 @@ func addRunFlags(fs *flag.FlagSet, cfg *RunConfig) {
 	fs.BoolVar(&cfg.KeepTemp, "keep-temp", cfg.KeepTemp, "Keep intermediate WAV files")
 }
 
+func addHelpFlags(fs *flag.FlagSet, help *bool) {
+	fs.BoolVar(help, "help", false, "Show help")
+	fs.BoolVar(help, "h", false, "Show help")
+}
+
+func finishHelp(env *Envelope, started time.Time, helpText string) (Envelope, int) {
+	env.Data = helpText
+	finishEnvelope(env, started, 0, 0, 0)
+	return *env, exitOK
+}
+
 func handleRun(args []string) (Envelope, int) {
 	started := time.Now()
 	env := newEnvelope("run")
@@ -330,18 +376,19 @@ func handleRun(args []string) (Envelope, int) {
 	fs.SetOutput(io.Discard)
 	addGlobalFlags(fs, &global)
 	addRunFlags(fs, &cfg)
-	fs.BoolVar(&help, "help", false, "Show help")
+	addHelpFlags(fs, &help)
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, runHelp())
+		}
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby run --help' for usage")}
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitInput
 	}
 	if help {
-		env.Data = runHelp()
-		finishEnvelope(&env, started, 0, 0, 0)
-		return env, exitOK
+		return finishHelp(&env, started, runHelp())
 	}
 
 	if !isValidOutputMode(global.Output) {
@@ -504,6 +551,7 @@ func handleRun(args []string) (Envelope, int) {
 	}
 
 	env.Data = runData
+	env.Warnings = append(env.Warnings, maybeHandleClipboard(global, cfg, runData.Files, progress)...)
 	if failures == 0 {
 		env.Status = "succeeded"
 	} else if successes > 0 {
@@ -537,18 +585,19 @@ func handleValidate(args []string) (Envelope, int) {
 	fs.SetOutput(io.Discard)
 	addGlobalFlags(fs, &global)
 	addRunFlags(fs, &cfg)
-	fs.BoolVar(&help, "help", false, "Show help")
+	addHelpFlags(fs, &help)
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, validateHelp())
+		}
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby validate --help' for usage")}
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitInput
 	}
 	if help {
-		env.Data = validateHelp()
-		finishEnvelope(&env, started, 0, 0, 0)
-		return env, exitOK
+		return finishHelp(&env, started, validateHelp())
 	}
 	if !isValidOutputMode(global.Output) {
 		env.Status = "failed"
@@ -651,17 +700,18 @@ func handleDoctor(args []string) (Envelope, int) {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addGlobalFlags(fs, &global)
-	fs.BoolVar(&help, "help", false, "Show help")
+	addHelpFlags(fs, &help)
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, doctorHelp())
+		}
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby doctor --help' for usage")}
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitInput
 	}
 	if help {
-		env.Data = doctorHelp()
-		finishEnvelope(&env, started, 0, 0, 0)
-		return env, exitOK
+		return finishHelp(&env, started, doctorHelp())
 	}
 
 	stateDir, err := ensureStateDir(global.StateDir)
@@ -735,18 +785,19 @@ func handleReplay(args []string) (Envelope, int) {
 	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addGlobalFlags(fs, &global)
-	fs.BoolVar(&help, "help", false, "Show help")
+	addHelpFlags(fs, &help)
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, replayHelp())
+		}
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby replay --help' for usage")}
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitInput
 	}
 	if help {
-		env.Data = replayHelp()
-		finishEnvelope(&env, started, 0, 0, 0)
-		return env, exitOK
+		return finishHelp(&env, started, replayHelp())
 	}
 
 	pos := fs.Args()
@@ -836,17 +887,18 @@ func handleModelsPull(args []string, started time.Time) (Envelope, int) {
 	addGlobalFlags(fs, &global)
 	fs.StringVar(&name, "name", name, "Model name (tiny|base|small|medium|large-v3)")
 	fs.StringVar(&url, "url", url, "Override model URL")
-	fs.BoolVar(&help, "help", false, "Show help")
+	addHelpFlags(fs, &help)
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, modelsHelp())
+		}
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby models pull --help'")}
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitInput
 	}
 	if help {
-		env.Data = modelsHelp()
-		finishEnvelope(&env, started, 0, 0, 0)
-		return env, exitOK
+		return finishHelp(&env, started, modelsHelp())
 	}
 	if !isValidOutputMode(global.Output) {
 		env.Status = "failed"
@@ -889,17 +941,18 @@ func handleModelsList(args []string, started time.Time) (Envelope, int) {
 	fs := flag.NewFlagSet("models list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addGlobalFlags(fs, &global)
-	fs.BoolVar(&help, "help", false, "Show help")
+	addHelpFlags(fs, &help)
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, modelsHelp())
+		}
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby models list --help'")}
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitInput
 	}
 	if help {
-		env.Data = modelsHelp()
-		finishEnvelope(&env, started, 0, 0, 0)
-		return env, exitOK
+		return finishHelp(&env, started, modelsHelp())
 	}
 	if !isValidOutputMode(global.Output) {
 		env.Status = "failed"
@@ -953,17 +1006,18 @@ func handleModelsPrune(args []string, started time.Time) (Envelope, int) {
 	fs.SetOutput(io.Discard)
 	addGlobalFlags(fs, &global)
 	fs.StringVar(&name, "name", name, "Model name to prune (empty = all)")
-	fs.BoolVar(&help, "help", false, "Show help")
+	addHelpFlags(fs, &help)
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, modelsHelp())
+		}
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby models prune --help'")}
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitInput
 	}
 	if help {
-		env.Data = modelsHelp()
-		finishEnvelope(&env, started, 0, 0, 0)
-		return env, exitOK
+		return finishHelp(&env, started, modelsHelp())
 	}
 	if !isValidOutputMode(global.Output) {
 		env.Status = "failed"
@@ -1836,6 +1890,13 @@ func validateRunInputs(cfg RunConfig) ([]Warning, *AppError) {
 		return warnings, &ae
 	}
 
+	switch normalizeClipboardMode(cfg.Clipboard) {
+	case "never", "ask", "always":
+	default:
+		ae := newError("input", "INVALID_CLIPBOARD_MODE", "--clipboard must be one of never|ask|always", false, "Use --clipboard never, ask, or always")
+		return warnings, &ae
+	}
+
 	if cfg.Prompt != "" && !fileExists(cfg.Prompt) {
 		warnings = append(warnings, Warning{Code: "PROMPT_NOT_FOUND", Message: fmt.Sprintf("Prompt file not found: %s. Run will fall back to prompt.md.", cfg.Prompt)})
 	}
@@ -1845,6 +1906,183 @@ func validateRunInputs(cfg RunConfig) ([]Warning, *AppError) {
 	}
 
 	return warnings, nil
+}
+
+type clipboardCommand struct {
+	Path string
+	Args []string
+}
+
+func normalizeClipboardMode(mode string) string {
+	return strings.ToLower(strings.TrimSpace(mode))
+}
+
+func maybeHandleClipboard(global GlobalOptions, cfg RunConfig, files []FileResult, progress *ProgressReporter) []Warning {
+	mode := normalizeClipboardMode(cfg.Clipboard)
+	if mode == "never" {
+		return nil
+	}
+
+	transcriptPath, warn := clipboardTranscriptPath(files)
+	if warn != nil {
+		return []Warning{*warn}
+	}
+	if transcriptPath == "" {
+		return nil
+	}
+
+	if mode == "ask" {
+		if !canPrompt(global) {
+			return []Warning{{
+				Code:    "CLIPBOARD_PROMPT_SKIPPED",
+				Message: "Clipboard prompt skipped because interactive prompts are disabled or no terminal is attached",
+			}}
+		}
+		approved, err := promptYesNo(os.Stdin, os.Stderr, "Copy transcript to clipboard? [Y/n] ")
+		if err != nil {
+			return []Warning{{
+				Code:    "CLIPBOARD_PROMPT_FAILED",
+				Message: fmt.Sprintf("Clipboard prompt failed: %v", err),
+			}}
+		}
+		if !approved {
+			progress.Step("clipboard.skip", "Clipboard copy skipped", map[string]any{"transcript": transcriptPath})
+			return nil
+		}
+	}
+
+	if err := copyFileToClipboard(transcriptPath); err != nil {
+		return []Warning{{
+			Code:    "CLIPBOARD_COPY_FAILED",
+			Message: fmt.Sprintf("Failed to copy transcript to clipboard: %v", err),
+		}}
+	}
+	progress.Step("clipboard.done", fmt.Sprintf("Copied transcript to clipboard: %s", transcriptPath), map[string]any{"transcript": transcriptPath})
+	return nil
+}
+
+func clipboardTranscriptPath(files []FileResult) (string, *Warning) {
+	transcripts := []string{}
+	for _, file := range files {
+		if file.Status == "succeeded" && strings.TrimSpace(file.Transcript) != "" {
+			transcripts = append(transcripts, file.Transcript)
+		}
+	}
+	if len(transcripts) == 0 {
+		return "", nil
+	}
+	if len(transcripts) > 1 {
+		warn := Warning{
+			Code:    "CLIPBOARD_SKIPPED_MULTIPLE_TRANSCRIPTS",
+			Message: fmt.Sprintf("Clipboard copy skipped because %d transcripts were produced; clipboard mode currently supports exactly 1 transcript", len(transcripts)),
+		}
+		return "", &warn
+	}
+	return transcripts[0], nil
+}
+
+func canPrompt(global GlobalOptions) bool {
+	if global.NonInteractive {
+		return false
+	}
+	return isCharDevice(os.Stdin) && isCharDevice(os.Stderr)
+}
+
+func isCharDevice(f *os.File) bool {
+	if f == nil {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+func promptYesNo(r io.Reader, w io.Writer, prompt string) (bool, error) {
+	if strings.TrimSpace(prompt) != "" {
+		if _, err := fmt.Fprint(w, prompt); err != nil {
+			return false, err
+		}
+	}
+	line, err := bufio.NewReader(r).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "", "y", "yes":
+		return true, nil
+	case "n", "no":
+		return false, nil
+	default:
+		return false, nil
+	}
+}
+
+func copyFileToClipboard(path string) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	return copyTextToClipboard(string(content))
+}
+
+func copyTextToClipboard(text string) error {
+	cmdInfo, err := clipboardCommandFor(runtime.GOOS, os.Getenv, exec.LookPath)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(cmdInfo.Path, cmdInfo.Args...)
+	cmd.Stdin = strings.NewReader(text)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if hint := trimHint(stderr.String()); hint != "" {
+			return fmt.Errorf("%w: %s", err, hint)
+		}
+		return err
+	}
+	return nil
+}
+
+func clipboardCommandFor(goos string, getenv func(string) string, lookPath func(string) (string, error)) (clipboardCommand, error) {
+	switch goos {
+	case "darwin":
+		if path, err := lookPath("pbcopy"); err == nil {
+			return clipboardCommand{Path: path}, nil
+		}
+		return clipboardCommand{}, fmt.Errorf("clipboard unavailable: pbcopy not found")
+	case "windows":
+		if path, err := lookPath("clip"); err == nil {
+			return clipboardCommand{Path: path}, nil
+		}
+		if path, err := lookPath("clip.exe"); err == nil {
+			return clipboardCommand{Path: path}, nil
+		}
+		if path, err := lookPath("powershell"); err == nil {
+			return clipboardCommand{Path: path, Args: []string{"-NoProfile", "-Command", "$text = [Console]::In.ReadToEnd(); Set-Clipboard -Value $text"}}, nil
+		}
+		if path, err := lookPath("powershell.exe"); err == nil {
+			return clipboardCommand{Path: path, Args: []string{"-NoProfile", "-Command", "$text = [Console]::In.ReadToEnd(); Set-Clipboard -Value $text"}}, nil
+		}
+		return clipboardCommand{}, fmt.Errorf("clipboard unavailable: clip.exe or powershell not found")
+	default:
+		if getenv("WAYLAND_DISPLAY") != "" || strings.EqualFold(getenv("XDG_SESSION_TYPE"), "wayland") {
+			if path, err := lookPath("wl-copy"); err == nil {
+				return clipboardCommand{Path: path}, nil
+			}
+		}
+		if path, err := lookPath("xclip"); err == nil {
+			return clipboardCommand{Path: path, Args: []string{"-selection", "clipboard"}}, nil
+		}
+		if path, err := lookPath("xsel"); err == nil {
+			return clipboardCommand{Path: path, Args: []string{"--clipboard", "--input"}}, nil
+		}
+		if path, err := lookPath("wl-copy"); err == nil {
+			return clipboardCommand{Path: path}, nil
+		}
+		return clipboardCommand{}, fmt.Errorf("clipboard unavailable: install wl-copy, xclip, or xsel")
+	}
 }
 
 func commandContext(timeoutMS int) (context.Context, context.CancelFunc) {
@@ -1906,6 +2144,14 @@ func printEnvelope(env Envelope, mode string) error {
 		enc.SetEscapeHTML(false)
 		return enc.Encode(env)
 	}
+}
+
+func printCommandResult(env Envelope, args []string) error {
+	if help, ok := helpText(env); ok && shouldPrintRawHelp(args) {
+		_, err := fmt.Fprint(os.Stdout, help)
+		return err
+	}
+	return printEnvelope(env, guessOutput(args))
 }
 
 func printTextEnvelope(env Envelope) error {
@@ -1994,16 +2240,105 @@ func finishEnvelope(env *Envelope, started time.Time, total int64, succeeded int
 }
 
 func guessOutput(args []string) string {
+	mode, _ := outputPreference(args)
+	return mode
+}
+
+func outputPreference(args []string) (string, string) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if strings.HasPrefix(a, "--output=") {
-			return strings.TrimSpace(strings.TrimPrefix(a, "--output="))
+			return strings.TrimSpace(strings.TrimPrefix(a, "--output=")), "flag"
 		}
 		if a == "--output" && i+1 < len(args) {
-			return strings.TrimSpace(args[i+1])
+			return strings.TrimSpace(args[i+1]), "flag"
 		}
 	}
-	return envOr("SCRIBY_OUTPUT", "json")
+	if mode, ok := os.LookupEnv("SCRIBY_OUTPUT"); ok {
+		trimmed := strings.TrimSpace(mode)
+		if trimmed != "" {
+			return trimmed, "env"
+		}
+	}
+	return "json", "default"
+}
+
+func helpText(env Envelope) (string, bool) {
+	if env.Status != "succeeded" || len(env.Errors) != 0 {
+		return "", false
+	}
+	text, ok := env.Data.(string)
+	if !ok {
+		return "", false
+	}
+	if !strings.HasPrefix(text, "Usage: scriby ") {
+		return "", false
+	}
+	return text, true
+}
+
+func shouldPrintRawHelp(args []string) bool {
+	mode, source := outputPreference(args)
+	switch source {
+	case "flag", "env":
+		return mode == "text"
+	default:
+		return isCharDevice(os.Stdout)
+	}
+}
+
+func splitRootArgs(args []string) ([]string, []string, bool, error) {
+	leading := []string{}
+	help := false
+
+	for i := 0; i < len(args); {
+		arg := args[i]
+		if arg == "--" {
+			return leading, args[i+1:], help, nil
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			return leading, args[i:], help, nil
+		}
+
+		switch {
+		case arg == "-h" || arg == "--help":
+			help = true
+			leading = append(leading, arg)
+			i++
+		case arg == "--strict" || arg == "--non-interactive" || arg == "--yes":
+			leading = append(leading, arg)
+			i++
+		case strings.HasPrefix(arg, "--output="),
+			strings.HasPrefix(arg, "--timeout-ms="),
+			strings.HasPrefix(arg, "--max-retries="),
+			strings.HasPrefix(arg, "--idempotency-key="),
+			strings.HasPrefix(arg, "--session-policy="),
+			strings.HasPrefix(arg, "--session-id="),
+			strings.HasPrefix(arg, "--state-dir="):
+			leading = append(leading, arg)
+			i++
+		case arg == "--output",
+			arg == "--timeout-ms",
+			arg == "--max-retries",
+			arg == "--idempotency-key",
+			arg == "--session-policy",
+			arg == "--session-id",
+			arg == "--state-dir":
+			if i+1 >= len(args) {
+				return nil, nil, false, fmt.Errorf("flag needs an argument: %s", arg)
+			}
+			leading = append(leading, arg, args[i+1])
+			i += 2
+		default:
+			name := strings.TrimLeft(arg, "-")
+			if name == "" {
+				name = arg
+			}
+			return nil, nil, false, fmt.Errorf("flag provided but not defined: -%s", name)
+		}
+	}
+
+	return leading, nil, help, nil
 }
 
 func isValidOutputMode(mode string) bool {
@@ -2192,6 +2527,7 @@ Args:
 
 Run Flags:
   --prompt <path>           Prompt file override
+  --clipboard <mode>        never|ask|always (default: ask)
   --mono-mode <mode>        left|right|average (default: average)
   --sample-rate <hz>        Sample rate for conversion (default: 16000)
   --timestamps              Include timestamps in transcript
@@ -2210,7 +2546,7 @@ Run Flags:
 Global Flags:
   --output json|jsonl|text  (jsonl streams progress/events; json/text print progress to stderr)
   --strict
-  --non-interactive
+  --non-interactive         Disable interactive prompts (default: false)
   --yes
   --timeout-ms <ms>
   --max-retries <n>

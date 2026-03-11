@@ -11,7 +11,7 @@ Releases:
 Quick install (macOS/Linux):
 
 ```bash
-VERSION="v0.1.1"
+VERSION="v0.1.2"
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -28,7 +28,7 @@ scriby --help
 macOS Apple Silicon (`arm64`) direct example:
 
 ```bash
-curl -L -o /tmp/scriby.tar.gz "https://github.com/nibzard/scriby/releases/download/v0.1.1/scriby-v0.1.1-darwin-arm64.tar.gz"
+curl -L -o /tmp/scriby.tar.gz "https://github.com/nibzard/scriby/releases/download/v0.1.2/scriby-v0.1.2-darwin-arm64.tar.gz"
 tar -xzf /tmp/scriby.tar.gz -C /tmp
 sudo install /tmp/scriby /usr/local/bin/scriby
 scriby --help
@@ -66,6 +66,14 @@ scriby run --model medium --language en --stream-transcript=false ./meeting.wav
 
 Supported input formats include `.mp4`, `.m4a`, `.mp3`, `.mov`, and `.wav`.
 
+Clipboard prompting is enabled by default for interactive runs. Use these overrides when needed:
+
+```bash
+scriby run --clipboard always /path/to/file.mov
+scriby run --clipboard never /path/to/file.mov
+scriby run --non-interactive /path/to/file.mov
+```
+
 ## Build from source
 
 ```bash
@@ -80,7 +88,7 @@ Scriby release binaries:
 
 ```bash
 make test
-make dist VERSION=v0.1.1
+make dist VERSION=v0.1.2
 ```
 
 This generates cross-platform archives under `dist/scriby`.
@@ -88,7 +96,7 @@ This generates cross-platform archives under `dist/scriby`.
 Whisper runtime assets + manifest (published in `nibzard/scriby`):
 
 ```bash
-make runtime-assets VERSION=v0.1.1
+make runtime-assets VERSION=v0.1.2
 ```
 
 This packages `runtime/bin/<os>_<arch>/whisper-cli(.exe)` into `dist/runtime` and generates:
@@ -105,7 +113,7 @@ GitHub Actions workflows:
 
 By default, Scriby resolves runtime assets from:
 
-`https://github.com/nibzard/scriby/releases/download/v0.1.1/runtime-manifest.json`
+`https://github.com/nibzard/scriby/releases/download/v0.1.2/runtime-manifest.json`
 
 Override when needed:
 
