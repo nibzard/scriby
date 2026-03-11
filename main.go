@@ -1718,7 +1718,7 @@ func extractZipBinary(archivePath string, binaryName string, destPath string) er
 func listInputFiles(input string) ([]string, *AppError) {
 	if fileExists(input) {
 		if !isSupportedMediaFile(input) {
-			ae := newError("input", "UNSUPPORTED_FILE_TYPE", "input file is not supported media (mp4,m4a,mp3,wav)", false, "Provide a supported media file")
+			ae := newError("input", "UNSUPPORTED_FILE_TYPE", "input file is not supported media (mp4,m4a,mp3,mov,wav)", false, "Provide a supported media file")
 			return nil, &ae
 		}
 		return []string{input}, nil
@@ -1745,7 +1745,7 @@ func listInputFiles(input string) ([]string, *AppError) {
 	}
 	sort.Strings(files)
 	if len(files) == 0 {
-		ae := newError("input", "NO_MEDIA_FILES", "no supported media files found in directory", false, "Directory mode scans top-level .mp4, .m4a, .mp3, .wav files")
+		ae := newError("input", "NO_MEDIA_FILES", "no supported media files found in directory", false, "Directory mode scans top-level .mp4, .m4a, .mp3, .mov, .wav files")
 		return nil, &ae
 	}
 	return files, nil
@@ -1754,7 +1754,7 @@ func listInputFiles(input string) ([]string, *AppError) {
 func isSupportedMediaFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
-	case ".mp4", ".m4a", ".mp3", ".wav":
+	case ".mp4", ".m4a", ".mp3", ".mov", ".wav":
 		return true
 	default:
 		return false
@@ -2187,7 +2187,7 @@ func runHelp() string {
 	return `Usage: scriby run [flags] <file-or-directory> [prompt_file]
 
 Args:
-  <file-or-directory>  One media file or a directory scanned for top-level .mp4/.m4a/.mp3/.wav
+  <file-or-directory>  One media file or a directory scanned for top-level .mp4/.m4a/.mp3/.mov/.wav
   [prompt_file]        Optional prompt file for description generation
 
 Run Flags:

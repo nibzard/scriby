@@ -72,3 +72,71 @@ func TestVerifyFileSHA256(t *testing.T) {
 		t.Fatal("verifyFileSHA256 should fail for wrong checksum")
 	}
 }
+
+func TestIsSupportedMediaFile(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "meeting.mp4", want: true},
+		{path: "podcast.m4a", want: true},
+		{path: "voice.mp3", want: true},
+		{path: "screen-recording.mov", want: true},
+		{path: "capture.MOV", want: true},
+		{path: "notes.wav", want: true},
+		{path: "transcript.txt", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isSupportedMediaFile(tt.path); got != tt.want {
+				t.Fatalf("isSupportedMediaFile(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestListInputFilesAcceptsMOV(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Screen Recording.mov")
+	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	files, err := listInputFiles(path)
+	if err != nil {
+		t.Fatalf("listInputFiles returned error: %#v", err)
+	}
+	if len(files) != 1 || files[0] != path {
+		t.Fatalf("listInputFiles(%q) = %#v, want [%q]", path, files, path)
+	}
+}
+
+func TestListInputFilesDirectoryIncludesMOV(t *testing.T) {
+	dir := t.TempDir()
+	want := []string{
+		filepath.Join(dir, "a.mov"),
+		filepath.Join(dir, "b.mp4"),
+	}
+	for _, path := range want {
+		if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
+			t.Fatalf("write file %q: %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ignore.txt"), []byte("fake"), 0o644); err != nil {
+		t.Fatalf("write ignore file: %v", err)
+	}
+
+	files, err := listInputFiles(dir)
+	if err != nil {
+		t.Fatalf("listInputFiles returned error: %#v", err)
+	}
+	if len(files) != len(want) {
+		t.Fatalf("listInputFiles(%q) returned %d files, want %d: %#v", dir, len(files), len(want), files)
+	}
+	for i := range want {
+		if files[i] != want[i] {
+			t.Fatalf("listInputFiles(%q)[%d] = %q, want %q", dir, i, files[i], want[i])
+		}
+	}
+}

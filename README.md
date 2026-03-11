@@ -64,6 +64,8 @@ Example:
 scriby run --model medium --language en --stream-transcript=false ./meeting.wav
 ```
 
+Supported input formats include `.mp4`, `.m4a`, `.mp3`, `.mov`, and `.wav`.
+
 ## Build from source
 
 ```bash
