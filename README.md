@@ -72,6 +72,7 @@ Requirements:
 
 - Accept the model access conditions on Hugging Face for `CohereLabs/cohere-transcribe-03-2026`
 - Configure Hugging Face auth locally or export `HF_TOKEN`
+- Use a Python version with current `torch` wheels available. `python3.12` worked in local testing.
 - Install Python dependencies:
 
 ```bash
@@ -83,8 +84,10 @@ Run with the Cohere engine:
 ```bash
 scriby run \
   --engine cohere \
+  --python-path /path/to/python3.12 \
   --language en \
   --hf-model-id CohereLabs/cohere-transcribe-03-2026 \
+  --clipboard never \
   ./meeting.wav
 ```
 
@@ -93,6 +96,7 @@ Notes:
 - `--timestamps` is not supported by the Cohere engine.
 - `scriby models ...` still manages Whisper `ggml-*` files only.
 - The helper writes `cohere_transcribe.py` into Scriby's runtime cache on first use.
+- First run may take a while because Hugging Face model weights need to be downloaded and loaded.
 
 Supported input formats include `.mp4`, `.m4a`, `.mp3`, `.mov`, and `.wav`.
 
