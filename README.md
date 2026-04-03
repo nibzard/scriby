@@ -1,6 +1,6 @@
 # Scriby
 
-AI-native CLI for media transcription with `whisper-cli`, optional description generation via `llm`, and deterministic machine-parseable output.
+AI-native CLI for media transcription with `whisper-cli` by default, optional Cohere Transcribe via Hugging Face, optional description generation via `llm`, and deterministic machine-parseable output.
 
 ## Install from GitHub Release (recommended)
 
@@ -63,6 +63,36 @@ Example:
 ```bash
 scriby run --model medium --language en --stream-transcript=false ./meeting.wav
 ```
+
+## Cohere Transcribe engine
+
+Scriby can also run `CohereLabs/cohere-transcribe-03-2026` with an embedded Python helper.
+
+Requirements:
+
+- Accept the model access conditions on Hugging Face for `CohereLabs/cohere-transcribe-03-2026`
+- Configure Hugging Face auth locally or export `HF_TOKEN`
+- Install Python dependencies:
+
+```bash
+python3 -m pip install "transformers>=5.4.0" torch huggingface_hub soundfile librosa sentencepiece protobuf
+```
+
+Run with the Cohere engine:
+
+```bash
+scriby run \
+  --engine cohere \
+  --language en \
+  --hf-model-id CohereLabs/cohere-transcribe-03-2026 \
+  ./meeting.wav
+```
+
+Notes:
+
+- `--timestamps` is not supported by the Cohere engine.
+- `scriby models ...` still manages Whisper `ggml-*` files only.
+- The helper writes `cohere_transcribe.py` into Scriby's runtime cache on first use.
 
 Supported input formats include `.mp4`, `.m4a`, `.mp3`, `.mov`, and `.wav`.
 

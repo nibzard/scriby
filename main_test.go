@@ -47,10 +47,72 @@ func TestDefaultClipboardAndInteractivity(t *testing.T) {
 	if runCfg.Clipboard != "ask" {
 		t.Fatalf("defaultRunConfig().Clipboard = %q, want ask", runCfg.Clipboard)
 	}
+	if runCfg.Engine != "whisper" {
+		t.Fatalf("defaultRunConfig().Engine = %q, want whisper", runCfg.Engine)
+	}
 
 	global := defaultGlobalOptions()
 	if global.NonInteractive {
 		t.Fatal("defaultGlobalOptions().NonInteractive = true, want false")
+	}
+}
+
+func TestNormalizeEngine(t *testing.T) {
+	if got := normalizeEngine(""); got != "whisper" {
+		t.Fatalf("normalizeEngine(\"\") = %q, want whisper", got)
+	}
+	if got := normalizeEngine("COHERE"); got != "cohere" {
+		t.Fatalf("normalizeEngine(\"COHERE\") = %q, want cohere", got)
+	}
+}
+
+func TestValidateRunInputsRejectsUnknownEngine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.wav")
+	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	cfg := defaultRunConfig()
+	cfg.Input = path
+	cfg.Engine = "other"
+	_, err := validateRunInputs(cfg)
+	if err == nil || err.Code != "INVALID_ENGINE" {
+		t.Fatalf("expected INVALID_ENGINE, got %#v", err)
+	}
+}
+
+func TestValidateRunInputsRejectsCohereTimestamps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.wav")
+	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	cfg := defaultRunConfig()
+	cfg.Input = path
+	cfg.Engine = "cohere"
+	cfg.Timestamps = true
+	_, err := validateRunInputs(cfg)
+	if err == nil || err.Code != "COHERE_TIMESTAMPS_UNSUPPORTED" {
+		t.Fatalf("expected COHERE_TIMESTAMPS_UNSUPPORTED, got %#v", err)
+	}
+}
+
+func TestValidateRunInputsAcceptsCohereLanguageAliases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.wav")
+	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	cfg := defaultRunConfig()
+	cfg.Input = path
+	cfg.Engine = "cohere"
+	cfg.Language = "zh-CN"
+	warnings, err := validateRunInputs(cfg)
+	if err != nil {
+		t.Fatalf("validateRunInputs returned error: %#v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %#v", warnings)
 	}
 }
 
