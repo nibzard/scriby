@@ -26,6 +26,7 @@ import (
 )
 
 const (
+	appVersion                = "0.1.3"
 	schemaVersion             = "1.0"
 	defaultEngineName         = "whisper"
 	defaultModelName          = "medium"
@@ -231,6 +232,13 @@ func main() {
 	args := append(append([]string{}, leadingGlobalArgs...), remainingArgs[1:]...)
 
 	switch command {
+	case "version", "-V", "--version":
+		env := newEnvelope("version")
+		env.Status = "succeeded"
+		env.Data = appVersion
+		finishEnvelope(&env, time.Now(), 0, 0, 0)
+		_ = printCommandResult(env, args)
+		os.Exit(exitOK)
 	case "help", "-h", "--help":
 		env := rootHelpEnvelope()
 		_ = printCommandResult(env, args)
@@ -2512,6 +2520,9 @@ func splitRootArgs(args []string) ([]string, []string, bool, error) {
 			return leading, args[i+1:], help, nil
 		}
 		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			return leading, args[i:], help, nil
+		}
+		if arg == "-V" || arg == "--version" {
 			return leading, args[i:], help, nil
 		}
 
