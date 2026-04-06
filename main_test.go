@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -81,7 +82,38 @@ func TestValidateRunInputsRejectsUnknownEngine(t *testing.T) {
 	}
 }
 
+func TestIsAppleSilicon(t *testing.T) {
+	got := isAppleSilicon()
+	want := runtime.GOOS == "darwin" && runtime.GOARCH == "arm64"
+	if got != want {
+		t.Fatalf("isAppleSilicon() = %v, want %v (GOOS=%s, GOARCH=%s)", got, want, runtime.GOOS, runtime.GOARCH)
+	}
+}
+
+func TestValidateRunInputsRejectsCohereOnNonAppleSilicon(t *testing.T) {
+	if isAppleSilicon() {
+		t.Skip("test only runs on non-Apple-Silicon platforms")
+	}
+
+	path := filepath.Join(t.TempDir(), "sample.wav")
+	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	cfg := defaultRunConfig()
+	cfg.Input = path
+	cfg.Engine = "cohere"
+	_, err := validateRunInputs(cfg)
+	if err == nil || err.Code != "COHERE_REQUIRES_APPLE_SILICON" {
+		t.Fatalf("expected COHERE_REQUIRES_APPLE_SILICON, got %#v", err)
+	}
+}
+
 func TestValidateRunInputsRejectsCohereTimestamps(t *testing.T) {
+	if !isAppleSilicon() {
+		t.Skip("cohere validation requires Apple Silicon")
+	}
+
 	path := filepath.Join(t.TempDir(), "sample.wav")
 	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
@@ -98,6 +130,10 @@ func TestValidateRunInputsRejectsCohereTimestamps(t *testing.T) {
 }
 
 func TestValidateRunInputsAcceptsCohereLanguageAliases(t *testing.T) {
+	if !isAppleSilicon() {
+		t.Skip("cohere validation requires Apple Silicon")
+	}
+
 	path := filepath.Join(t.TempDir(), "sample.wav")
 	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)

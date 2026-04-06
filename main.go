@@ -31,7 +31,7 @@ const (
 	defaultModelName          = "medium"
 	defaultCohereModelID      = "CohereLabs/cohere-transcribe-03-2026"
 	defaultModelURLMedium     = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
-	defaultRuntimeManifestURL = "https://github.com/nibzard/scriby/releases/download/v0.1.2/runtime-manifest.json"
+	defaultRuntimeManifestURL = "https://github.com/nibzard/scriby/releases/download/v0.1.3/runtime-manifest.json"
 
 	exitOK         = 0
 	exitInput      = 2
@@ -379,7 +379,7 @@ func addRunFlags(fs *flag.FlagSet, cfg *RunConfig) {
 	fs.StringVar(&cfg.ModelName, "model", cfg.ModelName, "Whisper model name (tiny|base|small|medium|large-v3)")
 	fs.StringVar(&cfg.ModelURL, "model-url", cfg.ModelURL, "Override Whisper model download URL")
 	fs.StringVar(&cfg.HFModelID, "hf-model-id", cfg.HFModelID, "Hugging Face model ID for the cohere engine")
-	fs.StringVar(&cfg.PythonPath, "python-path", cfg.PythonPath, "Python executable for the cohere engine helper")
+	fs.StringVar(&cfg.PythonPath, "python-path", cfg.PythonPath, "Python executable (unused by cohere engine, which uses uv)")
 	fs.StringVar(&cfg.WhisperPath, "whisper-path", cfg.WhisperPath, "Path to whisper-cli binary")
 	fs.StringVar(&cfg.WhisperURL, "whisper-url", cfg.WhisperURL, "URL for whisper runtime binary/archive")
 	fs.StringVar(&cfg.RuntimeManifestURL, "runtime-manifest-url", cfg.RuntimeManifestURL, "Runtime manifest URL for deterministic whisper bootstrap")
@@ -528,16 +528,15 @@ func handleRun(args []string) (Envelope, int) {
 		transcriberPath = wPath
 		modelRef = modelFilename(cfg.ModelName)
 	case "cohere":
-		progress.Step("runtime.ensure", "Preparing Cohere Transcribe helper", nil)
-		pythonPath, helperPath, cerr := ensureCohereRuntime(stateDir, cfg.PythonPath)
+		progress.Step("runtime.ensure", "Checking uv and mlx-audio runtime", nil)
+		uvPath, cerr := ensureMLXAudioRuntime()
 		if cerr != nil {
 			env.Status = "failed"
 			env.Errors = []AppError{*cerr}
 			finishEnvelope(&env, started, 0, 0, 0)
 			return env, exitDependency
 		}
-		cfg.PythonPath = pythonPath
-		transcriberPath = helperPath
+		transcriberPath = uvPath
 		modelRef = strings.TrimSpace(cfg.HFModelID)
 		progress.Step("model.ensure", fmt.Sprintf("Using Hugging Face model %s", modelRef), map[string]any{"model": modelRef})
 	}
@@ -733,13 +732,13 @@ func handleValidate(args []string) (Envelope, int) {
 		modelPath := filepath.Join(stateDir, "models", modelFilename(cfg.ModelName))
 		checks["model_present"] = fileExists(modelPath)
 	case "cohere":
-		pythonPath, err := resolvePythonPath(cfg.PythonPath)
-		checks["python"] = err == nil
-		if err == nil {
-			checks["python_path"] = pythonPath
+		checks["apple_silicon"] = isAppleSilicon()
+		if uvPath, err := exec.LookPath("uv"); err == nil {
+			checks["uv"] = true
+			checks["uv_path"] = uvPath
+		} else {
+			checks["uv"] = false
 		}
-		helperPath := filepath.Join(stateDir, "runtime", "cohere_transcribe.py")
-		checks["cohere_helper"] = fileExists(helperPath)
 		checks["hf_model_id"] = strings.TrimSpace(cfg.HFModelID)
 		checks["hf_token_present"] = strings.TrimSpace(os.Getenv("HF_TOKEN")) != ""
 	}
@@ -756,9 +755,9 @@ func handleValidate(args []string) (Envelope, int) {
 				env.Errors = append(env.Errors, newError("dependency", "WHISPER_NOT_READY", "whisper runtime missing and no --whisper-url provided", false, "Provide --whisper-url or install whisper-cli"))
 			}
 		case "cohere":
-			if ok, _ := checks["python"].(bool); !ok {
+			if ok, _ := checks["uv"].(bool); !ok {
 				env.Status = "failed"
-				env.Errors = append(env.Errors, newError("dependency", "PYTHON_NOT_FOUND", "python runtime missing for cohere engine", false, "Install python3 or pass --python-path"))
+				env.Errors = append(env.Errors, newError("dependency", "UV_NOT_FOUND", "uv not found for cohere engine", false, "Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"))
 			}
 		}
 	}
@@ -836,17 +835,16 @@ func handleDoctor(args []string) (Envelope, int) {
 		checks = append(checks, DoctorCheck{Name: "llm", Status: "missing", Details: "Optional: needed only for description generation"})
 	}
 
-	if p, err := resolvePythonPath(""); err == nil {
-		checks = append(checks, DoctorCheck{Name: "python", Status: "ok", Details: p})
+	if isAppleSilicon() {
+		checks = append(checks, DoctorCheck{Name: "apple_silicon", Status: "ok", Details: "darwin/arm64"})
 	} else {
-		checks = append(checks, DoctorCheck{Name: "python", Status: "missing", Details: "Optional: needed for --engine cohere"})
+		checks = append(checks, DoctorCheck{Name: "apple_silicon", Status: "missing", Details: "Cohere engine requires Apple Silicon (darwin/arm64)"})
 	}
 
-	cohereHelperPath := filepath.Join(stateDir, "runtime", "cohere_transcribe.py")
-	if fileExists(cohereHelperPath) {
-		checks = append(checks, DoctorCheck{Name: "cohere.helper", Status: "ok", Details: cohereHelperPath})
+	if p, err := exec.LookPath("uv"); err == nil {
+		checks = append(checks, DoctorCheck{Name: "uv", Status: "ok", Details: p})
 	} else {
-		checks = append(checks, DoctorCheck{Name: "cohere.helper", Status: "missing", Details: "Will be installed automatically on first --engine cohere run"})
+		checks = append(checks, DoctorCheck{Name: "uv", Status: "missing", Details: "Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"})
 	}
 
 	if strings.TrimSpace(os.Getenv("HF_TOKEN")) != "" {
@@ -1349,7 +1347,7 @@ func detectAudioChannels(ctx context.Context, ffmpegPath string, input string) (
 func transcribeAudio(ctx context.Context, cfg RunConfig, transcriberPath string, modelPath string, wavPath string, transcriptPath string, outputMode string, runID string, mediaPath string, progress *ProgressReporter) *AppError {
 	switch normalizeEngine(cfg.Engine) {
 	case "cohere":
-		return transcribeWithCohere(ctx, cfg.PythonPath, transcriberPath, cfg.HFModelID, cfg.Language, wavPath, transcriptPath, outputMode, runID, mediaPath, progress)
+		return transcribeWithCohere(ctx, transcriberPath, cfg.HFModelID, cfg.Language, wavPath, transcriptPath, outputMode, runID, mediaPath, progress)
 	default:
 		return transcribeWithWhisper(ctx, transcriberPath, modelPath, cfg.Language, wavPath, transcriptPath, cfg.StreamTranscript, cfg.Timestamps, outputMode, runID, mediaPath, progress)
 	}
@@ -1438,17 +1436,20 @@ func transcribeWithWhisper(ctx context.Context, whisperPath string, modelPath st
 	return nil
 }
 
-func transcribeWithCohere(ctx context.Context, pythonPath string, helperPath string, modelID string, language string, wavPath string, transcriptPath string, outputMode string, runID string, mediaPath string, progress *ProgressReporter) *AppError {
+func transcribeWithCohere(ctx context.Context, uvPath string, modelID string, language string, wavPath string, transcriptPath string, outputMode string, runID string, mediaPath string, progress *ProgressReporter) *AppError {
 	progress.Step("transcribe.start", fmt.Sprintf("Transcribing: %s", filepath.Base(mediaPath)), map[string]any{"file": mediaPath, "engine": "cohere"})
 
+	outputBase := strings.TrimSuffix(transcriptPath, filepath.Ext(transcriptPath))
 	args := []string{
-		helperPath,
-		"--input", wavPath,
-		"--output", transcriptPath,
+		"run", "--with", "mlx-audio",
+		"python", "-m", "mlx_audio.stt.generate",
+		"--model", strings.TrimSpace(modelID),
+		"--audio", wavPath,
+		"--output-path", outputBase,
+		"--format", "txt",
 		"--language", normalizeCohereLanguage(language),
-		"--model-id", strings.TrimSpace(modelID),
 	}
-	cmd := exec.CommandContext(ctx, pythonPath, args...)
+	cmd := exec.CommandContext(ctx, uvPath, args...)
 	var stdout strings.Builder
 	var stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -1460,9 +1461,20 @@ func transcribeWithCohere(ctx context.Context, pythonPath string, helperPath str
 		}
 		return ptrError(newError("runtime", "COHERE_TRANSCRIBE_FAILED", err.Error(), true, hint))
 	}
-	if !fileExists(transcriptPath) {
-		return ptrError(newError("runtime", "COHERE_OUTPUT_MISSING", "cohere helper did not write transcript output", true, "Check python stderr and Hugging Face access"))
+
+	mlxOutput := outputBase + ".txt"
+	if !fileExists(mlxOutput) {
+		return ptrError(newError("runtime", "COHERE_OUTPUT_MISSING", "mlx-audio did not write transcript output", true, "Check stderr output and Hugging Face access"))
 	}
+	if mlxOutput != transcriptPath {
+		if fileExists(transcriptPath) {
+			_ = os.Remove(transcriptPath)
+		}
+		if err := os.Rename(mlxOutput, transcriptPath); err != nil {
+			return ptrError(newError("filesystem", "TRANSCRIPT_RENAME_FAILED", err.Error(), true, "Check write permissions in media directory"))
+		}
+	}
+
 	if outputMode == "jsonl" {
 		emitJSONLEvent("run", runID, "transcript.complete", map[string]any{"file": mediaPath, "transcript": transcriptPath, "engine": "cohere"})
 	}
@@ -1572,44 +1584,15 @@ func ensureWhisperPath(ctx context.Context, stateDir string, explicitPath string
 	return runtimePath, nil
 }
 
-func ensureCohereRuntime(stateDir string, explicitPythonPath string) (string, string, *AppError) {
-	pythonPath, err := resolvePythonPath(explicitPythonPath)
+func ensureMLXAudioRuntime() (string, *AppError) {
+	uvPath, err := exec.LookPath("uv")
 	if err != nil {
-		ae := newError("dependency", "PYTHON_NOT_FOUND", err.Error(), false, "Install python3 or pass --python-path")
-		return "", "", &ae
+		ae := newError("dependency", "UV_NOT_FOUND", "uv not found in PATH", false, "Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh")
+		return "", &ae
 	}
-
-	runtimeDir := filepath.Join(stateDir, "runtime")
-	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
-		ae := newError("filesystem", "RUNTIME_DIR_CREATE_FAILED", err.Error(), true, "Set --state-dir to a writable directory")
-		return "", "", &ae
-	}
-
-	helperPath := filepath.Join(runtimeDir, "cohere_transcribe.py")
-	if err := os.WriteFile(helperPath, []byte(cohereTranscribePythonScript), 0o755); err != nil {
-		ae := newError("filesystem", "COHERE_HELPER_WRITE_FAILED", err.Error(), true, "Ensure state directory is writable")
-		return "", "", &ae
-	}
-	return pythonPath, helperPath, nil
+	return uvPath, nil
 }
 
-func resolvePythonPath(explicitPath string) (string, error) {
-	if strings.TrimSpace(explicitPath) != "" {
-		if p, err := exec.LookPath(explicitPath); err == nil {
-			return p, nil
-		}
-		if fileExists(explicitPath) {
-			return explicitPath, nil
-		}
-		return "", fmt.Errorf("python executable not found at %s", explicitPath)
-	}
-	for _, candidate := range []string{"python3", "python"} {
-		if p, err := exec.LookPath(candidate); err == nil {
-			return p, nil
-		}
-	}
-	return "", errors.New("python executable not found in PATH")
-}
 
 func loadRuntimeManifest(ctx context.Context, manifestURL string, maxRetries int, progress *ProgressReporter) (RuntimeManifest, error) {
 	tmp, err := os.CreateTemp("", "scriby-runtime-manifest-*.json")
@@ -2098,12 +2081,12 @@ func validateRunInputs(cfg RunConfig) ([]Warning, *AppError) {
 	}
 
 	if engine == "cohere" {
-		if cfg.Timestamps {
-			ae := newError("input", "COHERE_TIMESTAMPS_UNSUPPORTED", "--timestamps is not supported by the cohere engine", false, "Run without --timestamps or use --engine whisper")
+		if !isAppleSilicon() {
+			ae := newError("input", "COHERE_REQUIRES_APPLE_SILICON", "the cohere engine requires Apple Silicon (darwin/arm64)", false, "Use --engine whisper on this platform")
 			return warnings, &ae
 		}
-		if strings.TrimSpace(cfg.HFModelID) == "" {
-			ae := newError("input", "MISSING_HF_MODEL_ID", "--hf-model-id must be set for the cohere engine", false, "Use --hf-model-id CohereLabs/cohere-transcribe-03-2026")
+		if cfg.Timestamps {
+			ae := newError("input", "COHERE_TIMESTAMPS_UNSUPPORTED", "--timestamps is not supported by the cohere engine", false, "Run without --timestamps or use --engine whisper")
 			return warnings, &ae
 		}
 		normalizedLang := normalizeCohereLanguage(cfg.Language)
@@ -2127,6 +2110,10 @@ type clipboardCommand struct {
 
 func normalizeClipboardMode(mode string) string {
 	return strings.ToLower(strings.TrimSpace(mode))
+}
+
+func isAppleSilicon() bool {
+	return runtime.GOOS == "darwin" && runtime.GOARCH == "arm64"
 }
 
 func normalizeEngine(engine string) string {
@@ -2759,13 +2746,13 @@ Run Flags:
   --mono-mode <mode>        left|right|average (default: average)
   --sample-rate <hz>        Sample rate for conversion (default: 16000)
   --timestamps              Include timestamps in transcript (whisper engine only)
-  --engine <name>           whisper|cohere (default: whisper)
+  --engine <name>           whisper|cohere (default: whisper; cohere requires Apple Silicon + uv)
   --language <code>         Language code for the active ASR engine (default: en)
   --stream-transcript       Stream whisper stdout into transcript (default: true; whisper only)
   --model <name>            tiny|base|small|medium|large-v3 (whisper only)
   --model-url <url>         Override Whisper model download URL
-  --hf-model-id <repo>      Hugging Face model ID for the cohere engine
-  --python-path <path>      Python executable for the cohere engine helper
+  --hf-model-id <repo>      Hugging Face model ID for the cohere engine (default: CohereLabs/cohere-transcribe-03-2026)
+  --python-path <path>      Python executable (unused by cohere engine, which uses uv)
   --whisper-path <path>     Use an existing whisper binary
   --whisper-url <url>       Bootstrap whisper runtime from explicit URL/archive
   --runtime-manifest-url <url>
@@ -2810,7 +2797,7 @@ func doctorHelp() string {
 
 Purpose:
   Perform deterministic health checks for ffmpeg, whisper runtime, whisper model availability,
-  python/cohere helper readiness, llm optional dependency, and state directory writability.
+  uv/mlx-audio readiness, llm optional dependency, and state directory writability.
 
 Exit Codes:
   0 success, 2 input, 3 dependency/setup, 4 runtime failure, 10 internal

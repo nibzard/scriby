@@ -1,6 +1,6 @@
 # Scriby
 
-AI-native CLI for media transcription with `whisper-cli` by default, optional Cohere Transcribe via Hugging Face, optional description generation via `llm`, and deterministic machine-parseable output.
+AI-native CLI for media transcription with `whisper-cli` by default, optional Cohere Transcribe via mlx-audio on Apple Silicon, optional description generation via `llm`, and deterministic machine-parseable output.
 
 ## Install from GitHub Release (recommended)
 
@@ -11,7 +11,7 @@ Releases:
 Quick install (macOS/Linux):
 
 ```bash
-VERSION="v0.1.2"
+VERSION="v0.1.3"
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -28,7 +28,7 @@ scriby --help
 macOS Apple Silicon (`arm64`) direct example:
 
 ```bash
-curl -L -o /tmp/scriby.tar.gz "https://github.com/nibzard/scriby/releases/download/v0.1.2/scriby-v0.1.2-darwin-arm64.tar.gz"
+curl -L -o /tmp/scriby.tar.gz "https://github.com/nibzard/scriby/releases/download/v0.1.3/scriby-v0.1.3-darwin-arm64.tar.gz"
 tar -xzf /tmp/scriby.tar.gz -C /tmp
 sudo install /tmp/scriby /usr/local/bin/scriby
 scriby --help
@@ -66,37 +66,46 @@ scriby run --model medium --language en --stream-transcript=false ./meeting.wav
 
 ## Cohere Transcribe engine
 
-Scriby can also run `CohereLabs/cohere-transcribe-03-2026` with an embedded Python helper.
+Scriby can run `CohereLabs/cohere-transcribe-03-2026` via [mlx-audio](https://github.com/Blaizzy/mlx-audio) on Apple Silicon. Scriby uses [uv](https://docs.astral.sh/uv/) to manage the Python runtime and dependencies automatically.
 
 Requirements:
 
+- Apple Silicon Mac (M1/M2/M3/M4)
+- [uv](https://docs.astral.sh/uv/) installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - Accept the model access conditions on Hugging Face for `CohereLabs/cohere-transcribe-03-2026`
-- Configure Hugging Face auth locally or export `HF_TOKEN`
-- Use a Python version with current `torch` wheels available. `python3.12` worked in local testing.
-- Install Python dependencies:
-
-```bash
-python3 -m pip install "transformers>=5.4.0" torch huggingface_hub soundfile librosa sentencepiece protobuf
-```
+- Export `HF_TOKEN` or configure Hugging Face auth locally
 
 Run with the Cohere engine:
 
 ```bash
+export HF_TOKEN=...
 scriby run \
   --engine cohere \
-  --python-path /path/to/python3.12 \
   --language en \
-  --hf-model-id CohereLabs/cohere-transcribe-03-2026 \
   --clipboard never \
   ./meeting.wav
+```
+
+Tested flow with Cohere's demo audio:
+
+```bash
+curl -fsSL \
+  -H "Authorization: Bearer $HF_TOKEN" \
+  -o /tmp/voxpopuli_test_en_demo.wav \
+  https://huggingface.co/CohereLabs/cohere-transcribe-03-2026/resolve/main/demo/voxpopuli_test_en_demo.wav
+
+scriby run \
+  --engine cohere \
+  --language en \
+  --clipboard never \
+  /tmp/voxpopuli_test_en_demo.wav
 ```
 
 Notes:
 
 - `--timestamps` is not supported by the Cohere engine.
 - `scriby models ...` still manages Whisper `ggml-*` files only.
-- The helper writes `cohere_transcribe.py` into Scriby's runtime cache on first use.
-- First run may take a while because Hugging Face model weights need to be downloaded and loaded.
+- First run may take a while because uv installs mlx-audio and downloads model weights from Hugging Face.
 
 Supported input formats include `.mp4`, `.m4a`, `.mp3`, `.mov`, and `.wav`.
 
@@ -122,7 +131,7 @@ Scriby release binaries:
 
 ```bash
 make test
-make dist VERSION=v0.1.2
+make dist VERSION=v0.1.3
 ```
 
 This generates cross-platform archives under `dist/scriby`.
@@ -130,7 +139,7 @@ This generates cross-platform archives under `dist/scriby`.
 Whisper runtime assets + manifest (published in `nibzard/scriby`):
 
 ```bash
-make runtime-assets VERSION=v0.1.2
+make runtime-assets VERSION=v0.1.3
 ```
 
 This packages `runtime/bin/<os>_<arch>/whisper-cli(.exe)` into `dist/runtime` and generates:
@@ -147,7 +156,7 @@ GitHub Actions workflows:
 
 By default, Scriby resolves runtime assets from:
 
-`https://github.com/nibzard/scriby/releases/download/v0.1.2/runtime-manifest.json`
+`https://github.com/nibzard/scriby/releases/download/v0.1.3/runtime-manifest.json`
 
 Override when needed:
 
