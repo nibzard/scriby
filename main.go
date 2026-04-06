@@ -2374,6 +2374,10 @@ func printCommandResult(env Envelope, args []string) error {
 		_, err := fmt.Fprint(os.Stdout, help)
 		return err
 	}
+	if ver, ok := versionText(env); ok && shouldPrintRawHelp(args) {
+		_, err := fmt.Fprintln(os.Stdout, ver)
+		return err
+	}
 	return printEnvelope(env, guessOutput(args))
 }
 
@@ -2495,6 +2499,17 @@ func helpText(env Envelope) (string, bool) {
 		return "", false
 	}
 	if !strings.HasPrefix(text, "Usage: scriby ") {
+		return "", false
+	}
+	return text, true
+}
+
+func versionText(env Envelope) (string, bool) {
+	if env.Command != "version" || env.Status != "succeeded" {
+		return "", false
+	}
+	text, ok := env.Data.(string)
+	if !ok {
 		return "", false
 	}
 	return text, true
