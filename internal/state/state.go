@@ -24,11 +24,9 @@ func Ensure(explicit string) (string, error) {
 		return "", errors.New("unable to determine state dir")
 	}
 	stateDir := filepath.Join(home, ".scriby")
-	if !dirExists(stateDir) {
-		if legacy, ok := LegacyDir(); ok && dirExists(legacy) {
-			if err := copyDirContents(legacy, stateDir); err != nil {
-				return "", err
-			}
+	if legacy, ok := LegacyDir(); ok && dirExists(legacy) {
+		if err := copyDirContents(legacy, stateDir); err != nil {
+			return "", err
 		}
 	}
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {

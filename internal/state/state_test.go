@@ -46,3 +46,52 @@ func TestEnsureMigratesLegacyCacheState(t *testing.T) {
 		t.Fatalf("expected migrated model at %s: %v", migrated, err)
 	}
 }
+
+func TestEnsureMigratesMissingLegacyFilesWhenStateDirExists(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+
+	stateDir := filepath.Join(home, ".scriby")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	existing := filepath.Join(stateDir, "models", "ggml-medium.bin")
+	if err := os.MkdirAll(filepath.Dir(existing), 0o755); err != nil {
+		t.Fatalf("mkdir existing model dir: %v", err)
+	}
+	if err := os.WriteFile(existing, []byte("current"), 0o644); err != nil {
+		t.Fatalf("write existing model: %v", err)
+	}
+
+	legacy, ok := LegacyDir()
+	if !ok {
+		t.Skip("legacy cache dir unavailable")
+	}
+	legacyTiny := filepath.Join(legacy, "models", "ggml-tiny.bin")
+	if err := os.MkdirAll(filepath.Dir(legacyTiny), 0o755); err != nil {
+		t.Fatalf("mkdir legacy model dir: %v", err)
+	}
+	if err := os.WriteFile(legacyTiny, []byte("tiny"), 0o644); err != nil {
+		t.Fatalf("write legacy tiny model: %v", err)
+	}
+	legacyMedium := filepath.Join(legacy, "models", "ggml-medium.bin")
+	if err := os.WriteFile(legacyMedium, []byte("legacy"), 0o644); err != nil {
+		t.Fatalf("write legacy medium model: %v", err)
+	}
+
+	got, err := Ensure("")
+	if err != nil {
+		t.Fatalf("Ensure returned error: %v", err)
+	}
+	if got != stateDir {
+		t.Fatalf("Ensure returned %q, want %q", got, stateDir)
+	}
+	migratedTiny := filepath.Join(stateDir, "models", "ggml-tiny.bin")
+	if b, err := os.ReadFile(migratedTiny); err != nil || string(b) != "tiny" {
+		t.Fatalf("expected migrated tiny model, got %q, err %v", string(b), err)
+	}
+	if b, err := os.ReadFile(existing); err != nil || string(b) != "current" {
+		t.Fatalf("expected existing model to remain unchanged, got %q, err %v", string(b), err)
+	}
+}
