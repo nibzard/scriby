@@ -499,7 +499,7 @@ func finishHelp(env *Envelope, started time.Time, helpText string) (Envelope, in
 
 func handleRun(args []string) (Envelope, int) {
 	started := time.Now()
-	args = hoistGlobalFlags(args)
+	args = hoistRunFlags(args)
 	env := newEnvelope("run")
 	global := defaultGlobalOptions()
 	cfg := defaultRunConfig()
@@ -764,7 +764,7 @@ func aggregateRunStatus(successes int64, partials int64, failures int64) string 
 
 func handleValidate(args []string) (Envelope, int) {
 	started := time.Now()
-	args = hoistGlobalFlags(args)
+	args = hoistRunFlags(args)
 	env := newEnvelope("validate")
 	global := defaultGlobalOptions()
 	cfg := defaultRunConfig()
@@ -1091,7 +1091,6 @@ func handleReplay(args []string) (Envelope, int) {
 
 func handleRetry(args []string) (Envelope, int) {
 	started := time.Now()
-	args = hoistGlobalFlags(args)
 	args = hoistRetryFlags(args)
 	env := newEnvelope("retry")
 	global := defaultGlobalOptions()
@@ -1680,7 +1679,7 @@ func handleHistoryLatest(args []string, started time.Time) (Envelope, int) {
 }
 
 func handleHistoryShow(args []string, started time.Time) (Envelope, int) {
-	args = hoistGlobalFlags(args)
+	args = hoistHistoryShowFlags(args)
 	env := newEnvelope("history.show")
 	global := defaultGlobalOptions()
 	includeTranscript := false
@@ -1748,7 +1747,7 @@ func handleHistoryShow(args []string, started time.Time) (Envelope, int) {
 }
 
 func handleHistorySearch(args []string, started time.Time) (Envelope, int) {
-	args = hoistGlobalFlags(args)
+	args = hoistHistorySearchFlags(args)
 	env := newEnvelope("history.search")
 	global := defaultGlobalOptions()
 	limit := 20
@@ -1820,7 +1819,7 @@ func handleHistorySearch(args []string, started time.Time) (Envelope, int) {
 }
 
 func handleHistoryExport(args []string, started time.Time) (Envelope, int) {
-	args = hoistGlobalFlags(args)
+	args = hoistHistoryExportFlags(args)
 	env := newEnvelope("history.export")
 	global := defaultGlobalOptions()
 	format := "markdown"
@@ -3862,6 +3861,30 @@ func outputPreference(args []string) (string, string) {
 }
 
 func hoistGlobalFlags(args []string) []string {
+	return hoistKnownFlags(args, isGlobalBoolFlagName, isGlobalValueFlagName)
+}
+
+func hoistRunFlags(args []string) []string {
+	return hoistKnownFlags(args, isRunBoolFlagName, isRunValueFlagName)
+}
+
+func hoistRetryFlags(args []string) []string {
+	return hoistKnownFlags(args, isRetryBoolFlagName, isGlobalValueFlagName)
+}
+
+func hoistHistoryShowFlags(args []string) []string {
+	return hoistKnownFlags(args, isHistoryShowBoolFlagName, isGlobalValueFlagName)
+}
+
+func hoistHistorySearchFlags(args []string) []string {
+	return hoistKnownFlags(args, isHistorySearchBoolFlagName, isHistorySearchValueFlagName)
+}
+
+func hoistHistoryExportFlags(args []string) []string {
+	return hoistKnownFlags(args, isHistoryExportBoolFlagName, isHistoryExportValueFlagName)
+}
+
+func hoistKnownFlags(args []string, isBoolFlag func(string) bool, isValueFlag func(string) bool) []string {
 	if len(args) == 0 {
 		return args
 	}
@@ -3869,13 +3892,21 @@ func hoistGlobalFlags(args []string) []string {
 	rest := []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if isGlobalBoolFlag(arg) || isGlobalValueFlagEquals(arg) {
+		if arg == "--" {
+			rest = append(rest, args[i:]...)
+			break
+		}
+		name := flagName(arg)
+		if name != "" && isBoolFlag(name) {
 			front = append(front, arg)
 			continue
 		}
-		if isGlobalValueFlag(arg) && i+1 < len(args) {
-			front = append(front, arg, args[i+1])
-			i++
+		if name != "" && isValueFlag(name) {
+			front = append(front, arg)
+			if !strings.Contains(arg, "=") && i+1 < len(args) {
+				front = append(front, args[i+1])
+				i++
+			}
 			continue
 		}
 		rest = append(rest, arg)
@@ -3889,61 +3920,84 @@ func hoistGlobalFlags(args []string) []string {
 	return out
 }
 
-func hoistRetryFlags(args []string) []string {
-	if len(args) == 0 {
-		return args
+func flagName(arg string) string {
+	if arg == "-h" {
+		return "h"
 	}
-	front := []string{}
-	rest := []string{}
-	for _, arg := range args {
-		if arg == "--failed-only" || arg == "--failed-only=true" {
-			front = append(front, arg)
-			continue
-		}
-		rest = append(rest, arg)
+	if !strings.HasPrefix(arg, "--") || arg == "--" {
+		return ""
 	}
-	if len(front) == 0 {
-		return args
+	name := strings.TrimPrefix(arg, "--")
+	if idx := strings.Index(name, "="); idx >= 0 {
+		name = name[:idx]
 	}
-	out := make([]string, 0, len(args))
-	out = append(out, front...)
-	out = append(out, rest...)
-	return out
+	return name
 }
 
-func isGlobalBoolFlag(arg string) bool {
-	switch arg {
-	case "--agent", "--agent=true", "--strict", "--strict=true", "--non-interactive", "--non-interactive=true", "--yes", "--yes=true":
+func isGlobalBoolFlagName(name string) bool {
+	switch name {
+	case "agent", "strict", "non-interactive", "yes", "help", "h":
 		return true
 	default:
 		return false
 	}
 }
 
-func isGlobalValueFlag(arg string) bool {
-	switch arg {
-	case "--output", "--timeout-ms", "--max-retries", "--idempotency-key", "--session-policy", "--session-id", "--state-dir":
+func isGlobalValueFlagName(name string) bool {
+	switch name {
+	case "output", "timeout-ms", "max-retries", "idempotency-key", "session-policy", "session-id", "state-dir":
 		return true
 	default:
 		return false
 	}
 }
 
-func isGlobalValueFlagEquals(arg string) bool {
-	for _, prefix := range []string{
-		"--output=",
-		"--timeout-ms=",
-		"--max-retries=",
-		"--idempotency-key=",
-		"--session-policy=",
-		"--session-id=",
-		"--state-dir=",
-	} {
-		if strings.HasPrefix(arg, prefix) {
-			return true
-		}
+func isRunBoolFlagName(name string) bool {
+	if isGlobalBoolFlagName(name) {
+		return true
 	}
-	return false
+	switch name {
+	case "timestamps", "stream-transcript", "keep-temp":
+		return true
+	default:
+		return false
+	}
+}
+
+func isRunValueFlagName(name string) bool {
+	if isGlobalValueFlagName(name) {
+		return true
+	}
+	switch name {
+	case "prompt", "clipboard", "mono-mode", "sample-rate", "engine", "language", "model", "model-url", "hf-model-id", "python-path", "whisper-path", "whisper-url", "runtime-manifest-url", "ffmpeg-path", "llm-path", "output-dir", "artifact-mode":
+		return true
+	default:
+		return false
+	}
+}
+
+func isRetryBoolFlagName(name string) bool {
+	return isGlobalBoolFlagName(name) || name == "failed-only"
+}
+
+func isHistoryShowBoolFlagName(name string) bool {
+	return isGlobalBoolFlagName(name) || name == "include-transcript" || name == "transcript-only"
+}
+
+func isHistorySearchBoolFlagName(name string) bool {
+	return isGlobalBoolFlagName(name) || name == "include-transcript"
+}
+
+func isHistorySearchValueFlagName(name string) bool {
+	return isGlobalValueFlagName(name) || name == "limit" || name == "since"
+}
+
+func isHistoryExportBoolFlagName(name string) bool {
+	return isGlobalBoolFlagName(name) || name == "latest"
+}
+
+func isHistoryExportValueFlagName(name string) bool {
+	return isGlobalValueFlagName(name) || name == "format"
 }
 
 func helpText(env Envelope) (string, bool) {

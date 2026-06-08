@@ -1073,11 +1073,34 @@ func TestHoistGlobalFlagsAllowsTrailingAgent(t *testing.T) {
 	}
 }
 
+func TestHoistRunFlagsAllowsTrailingFlags(t *testing.T) {
+	got := hoistRunFlags([]string{"meeting.wav", "--clipboard", "never", "--language=en"})
+	want := []string{"--clipboard", "never", "--language=en", "meeting.wav"}
+	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
+		t.Fatalf("hoistRunFlags = %q, want %q", got, want)
+	}
+}
+
 func TestHoistRetryFlagsAllowsTrailingFailedOnly(t *testing.T) {
 	got := hoistRetryFlags([]string{"run-123", "--failed-only"})
 	want := []string{"--failed-only", "run-123"}
 	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
 		t.Fatalf("hoistRetryFlags = %q, want %q", got, want)
+	}
+}
+
+func TestHandleRunAcceptsFlagsAfterInput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.wav")
+	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	env, code := handleRun([]string{path, "--language", "zzz", "--clipboard", "never", "--state-dir", t.TempDir()})
+	if code != exitInput {
+		t.Fatalf("run code = %d, want %d; env = %#v", code, exitInput, env)
+	}
+	if env.Status != "failed" || len(env.Errors) != 1 || env.Errors[0].Code != "UNSUPPORTED_LANGUAGE" {
+		t.Fatalf("run env = %#v", env)
 	}
 }
 
@@ -1133,6 +1156,71 @@ func TestHistorySearchAcceptsTrailingAgent(t *testing.T) {
 	}
 	if matches[0].Transcript != "" || !strings.Contains(matches[0].TranscriptPreview, "developer tools") {
 		t.Fatalf("compact agent match = %#v", matches[0])
+	}
+}
+
+func TestHistoryShowAndExportAcceptFlagsAfterRunID(t *testing.T) {
+	stateDir := t.TempDir()
+	env := newEnvelope("run")
+	env.RunID = "20260224-130000-export"
+	env.Status = "succeeded"
+	env.Data = RunData{
+		Input:  "meeting.wav",
+		Engine: "whisper",
+		Files: []FileResult{{
+			File:       "meeting.wav",
+			Transcript: "missing.md",
+			Status:     "succeeded",
+		}},
+	}
+	env.Metrics["duration_ms"] = int64(10)
+	env.Metrics["files_total"] = int64(1)
+	env.Metrics["files_succeeded"] = int64(1)
+	env.Metrics["files_failed"] = int64(0)
+	if err := history.Save(stateDir, history.Record{
+		RunID:          env.RunID,
+		CreatedAt:      "2026-02-24T13:00:00Z",
+		Command:        "run",
+		Status:         "succeeded",
+		Input:          "meeting.wav",
+		Engine:         "whisper",
+		EnvelopeJSON:   `{"schema_version":"1.0"}`,
+		DurationMS:     10,
+		FilesTotal:     1,
+		FilesSucceeded: 1,
+		Files: []history.FileRecord{{
+			File:       "meeting.wav",
+			Status:     "succeeded",
+			Transcript: "developer tools strategy",
+		}},
+	}); err != nil {
+		t.Fatalf("save history: %v", err)
+	}
+
+	showEnv, code := handleHistory([]string{"show", env.RunID, "--include-transcript", "--state-dir", stateDir})
+	if code != exitOK {
+		t.Fatalf("history show code = %d env = %#v", code, showEnv)
+	}
+	showData, ok := showEnv.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("history show data = %T", showEnv.Data)
+	}
+	files, ok := showData["files"].([]history.Transcription)
+	if !ok || len(files) != 1 || files[0].Transcript != "developer tools strategy" {
+		t.Fatalf("history show files = %#v", showData["files"])
+	}
+
+	exportEnv, code := handleHistory([]string{"export", env.RunID, "--format", "markdown", "--state-dir", stateDir})
+	if code != exitOK {
+		t.Fatalf("history export code = %d env = %#v", code, exportEnv)
+	}
+	exportData, ok := exportEnv.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("history export data = %T", exportEnv.Data)
+	}
+	content, _ := exportData["content"].(string)
+	if !strings.Contains(content, "developer tools strategy") {
+		t.Fatalf("history export content = %q", content)
 	}
 }
 
