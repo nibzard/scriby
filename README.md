@@ -57,9 +57,19 @@ What happens on first run:
 - Scriby creates durable local state in `~/.scriby`.
 - Scriby installs `whisper-cli` to `~/.scriby/runtime`.
 - Scriby downloads the selected model to `~/.scriby/models`.
-- Transcript is written next to your input file as `<name>.md`.
+- Transcript history is written to an immutable run folder under `~/.scriby/runs/<run_id>/`.
+- By default, Scriby also writes a latest convenience copy next to your input file as `<name>.md`.
 - Run metadata plus transcript/description text are indexed in `~/.scriby/scriby.db`.
 - If an older cache state exists, Scriby copies it into `~/.scriby` on first use.
+
+Artifact modes:
+
+```bash
+scriby run ./meeting.wav --artifact-mode both       # default: immutable history + latest copy
+scriby run ./meeting.wav --artifact-mode versioned  # only ~/.scriby/runs/<run_id>/ artifacts
+scriby run ./meeting.wav --artifact-mode latest     # only latest output files
+scriby run ./meeting.wav --output-dir ./out         # latest copies go to ./out
+```
 
 Example:
 

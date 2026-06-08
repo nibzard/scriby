@@ -48,6 +48,43 @@ func TestModelDownloadNoticeExplainsFirstRunCost(t *testing.T) {
 	}
 }
 
+func TestRunArtifactPathsModes(t *testing.T) {
+	stateDir := t.TempDir()
+	mediaDir := t.TempDir()
+	media := filepath.Join(mediaDir, "meeting.wav")
+
+	both, err := runArtifactPaths(stateDir, "run-1", media, "", "both")
+	if err != nil {
+		t.Fatalf("runArtifactPaths both returned error: %v", err)
+	}
+	if both.TranscriptTarget != both.ArtifactTranscript {
+		t.Fatalf("both transcript target = %q, want artifact %q", both.TranscriptTarget, both.ArtifactTranscript)
+	}
+	if both.ArtifactTranscript == "" || both.LatestTranscript != filepath.Join(mediaDir, "meeting.md") {
+		t.Fatalf("both paths = %#v", both)
+	}
+	if !strings.Contains(both.ArtifactTranscript, filepath.Join(stateDir, "runs", "run-1")) {
+		t.Fatalf("artifact transcript = %q, want under run dir", both.ArtifactTranscript)
+	}
+
+	versioned, err := runArtifactPaths(stateDir, "run-1", media, "", "versioned")
+	if err != nil {
+		t.Fatalf("runArtifactPaths versioned returned error: %v", err)
+	}
+	if versioned.LatestTranscript != "" || versioned.ArtifactTranscript == "" {
+		t.Fatalf("versioned paths = %#v", versioned)
+	}
+
+	latestDir := t.TempDir()
+	latest, err := runArtifactPaths(stateDir, "run-1", media, latestDir, "latest")
+	if err != nil {
+		t.Fatalf("runArtifactPaths latest returned error: %v", err)
+	}
+	if latest.ArtifactTranscript != "" || latest.TranscriptTarget != filepath.Join(latestDir, "meeting.md") {
+		t.Fatalf("latest paths = %#v", latest)
+	}
+}
+
 func TestNormalizeArch(t *testing.T) {
 	if got := normalizeArch("x86_64"); got != "amd64" {
 		t.Fatalf("normalizeArch(x86_64) = %q, want amd64", got)
@@ -57,6 +94,57 @@ func TestNormalizeArch(t *testing.T) {
 	}
 	if got := normalizeArch("arm64"); got != "arm64" {
 		t.Fatalf("normalizeArch(arm64) = %q, want arm64", got)
+	}
+}
+
+func TestSaveHistoryRecordUsesArtifactPathAsCanonical(t *testing.T) {
+	stateDir := t.TempDir()
+	dir := t.TempDir()
+	latest := filepath.Join(dir, "meeting.md")
+	artifact := filepath.Join(stateDir, "runs", "run-1", "meeting.transcript.md")
+	if err := os.MkdirAll(filepath.Dir(artifact), 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	if err := os.WriteFile(latest, []byte("latest text"), 0o644); err != nil {
+		t.Fatalf("write latest: %v", err)
+	}
+	if err := os.WriteFile(artifact, []byte("artifact text"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+
+	env := newEnvelope("run")
+	env.RunID = "20260224-130000-artifact"
+	env.Data = RunData{
+		Input:        "meeting.wav",
+		Engine:       "whisper",
+		ArtifactMode: "both",
+		Files: []FileResult{{
+			File:               "meeting.wav",
+			Transcript:         latest,
+			LatestTranscript:   latest,
+			ArtifactTranscript: artifact,
+			Status:             "succeeded",
+		}},
+	}
+	env.Metrics["duration_ms"] = int64(1)
+	env.Metrics["files_total"] = int64(1)
+	env.Metrics["files_succeeded"] = int64(1)
+	env.Metrics["files_failed"] = int64(0)
+
+	if err := saveHistoryRecord(stateDir, env); err != nil {
+		t.Fatalf("saveHistoryRecord returned error: %v", err)
+	}
+	db, err := history.Open(stateDir)
+	if err != nil {
+		t.Fatalf("history.Open returned error: %v", err)
+	}
+	defer db.Close()
+	_, files, _, err := history.GetRun(db, env.RunID, true)
+	if err != nil {
+		t.Fatalf("history.GetRun returned error: %v", err)
+	}
+	if len(files) != 1 || files[0].TranscriptPath != artifact || files[0].Transcript != "artifact text" {
+		t.Fatalf("history file = %#v", files)
 	}
 }
 

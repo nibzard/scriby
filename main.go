@@ -132,6 +132,8 @@ type RunConfig struct {
 	RuntimeManifestURL string
 	FFmpegPath         string
 	LLMPath            string
+	OutputDir          string
+	ArtifactMode       string
 	KeepTemp           bool
 }
 
@@ -198,6 +200,7 @@ type RunData struct {
 	StreamTranscript bool         `json:"stream_transcript,omitempty"`
 	FFmpegPath       string       `json:"ffmpeg_path"`
 	TranscriberPath  string       `json:"transcriber_path,omitempty"`
+	ArtifactMode     string       `json:"artifact_mode,omitempty"`
 	ModelRef         string       `json:"model_ref,omitempty"`
 	ModelName        string       `json:"model_name,omitempty"`
 	HFModelID        string       `json:"hf_model_id,omitempty"`
@@ -207,12 +210,16 @@ type RunData struct {
 }
 
 type FileResult struct {
-	File        string    `json:"file"`
-	Transcript  string    `json:"transcript,omitempty"`
-	Description string    `json:"description,omitempty"`
-	Status      string    `json:"status"`
-	Warnings    []Warning `json:"warnings,omitempty"`
-	Error       *AppError `json:"error,omitempty"`
+	File                string    `json:"file"`
+	Transcript          string    `json:"transcript,omitempty"`
+	Description         string    `json:"description,omitempty"`
+	ArtifactTranscript  string    `json:"artifact_transcript,omitempty"`
+	ArtifactDescription string    `json:"artifact_description,omitempty"`
+	LatestTranscript    string    `json:"latest_transcript,omitempty"`
+	LatestDescription   string    `json:"latest_description,omitempty"`
+	Status              string    `json:"status"`
+	Warnings            []Warning `json:"warnings,omitempty"`
+	Error               *AppError `json:"error,omitempty"`
 }
 
 type DoctorCheck struct {
@@ -400,6 +407,8 @@ func defaultRunConfig() RunConfig {
 		RuntimeManifestURL: envOr("SCRIBY_RUNTIME_MANIFEST_URL", defaultRuntimeManifestURL),
 		FFmpegPath:         envOr("SCRIBY_FFMPEG_PATH", ""),
 		LLMPath:            envOr("SCRIBY_LLM_PATH", "llm"),
+		OutputDir:          envOr("SCRIBY_OUTPUT_DIR", ""),
+		ArtifactMode:       envOr("SCRIBY_ARTIFACT_MODE", "both"),
 		KeepTemp:           envBool("SCRIBY_KEEP_TEMP", false),
 	}
 }
@@ -452,6 +461,8 @@ func addRunFlags(fs *flag.FlagSet, cfg *RunConfig) {
 	fs.StringVar(&cfg.RuntimeManifestURL, "runtime-manifest-url", cfg.RuntimeManifestURL, "Runtime manifest URL for deterministic whisper bootstrap")
 	fs.StringVar(&cfg.FFmpegPath, "ffmpeg-path", cfg.FFmpegPath, "Path to ffmpeg binary")
 	fs.StringVar(&cfg.LLMPath, "llm-path", cfg.LLMPath, "Path to llm CLI binary")
+	fs.StringVar(&cfg.OutputDir, "output-dir", cfg.OutputDir, "Directory for latest transcript/description files (default: next to input)")
+	fs.StringVar(&cfg.ArtifactMode, "artifact-mode", cfg.ArtifactMode, "Artifact writing mode: latest|versioned|both")
 	fs.BoolVar(&cfg.KeepTemp, "keep-temp", cfg.KeepTemp, "Keep intermediate WAV files")
 }
 
@@ -653,6 +664,7 @@ func handleRun(args []string) (Envelope, int) {
 		StreamTranscript: cfg.StreamTranscript,
 		FFmpegPath:       ffmpegPath,
 		TranscriberPath:  transcriberPath,
+		ArtifactMode:     normalizeArtifactMode(cfg.ArtifactMode),
 		ModelRef:         modelRef,
 		ModelName:        cfg.ModelName,
 		HFModelID:        cfg.HFModelID,
@@ -670,7 +682,7 @@ func handleRun(args []string) (Envelope, int) {
 			fmt.Sprintf("Processing file %d/%d: %s", i+1, len(files), media),
 			map[string]any{"file": media, "index": i + 1, "total": len(files)},
 		)
-		fr, warns, perr := processMediaFile(ctx, cfg, media, ffmpegPath, transcriberPath, modelPath, llmPath, haveLLM, global.Output, env.RunID, progress)
+		fr, warns, perr := processMediaFile(ctx, cfg, stateDir, media, ffmpegPath, transcriberPath, modelPath, llmPath, haveLLM, global.Output, env.RunID, progress)
 		runData.Files = append(runData.Files, fr)
 		env.Warnings = append(env.Warnings, warns...)
 		if perr != nil {
@@ -1943,6 +1955,7 @@ func handleHistorySQL(args []string, started time.Time) (Envelope, int) {
 func processMediaFile(
 	ctx context.Context,
 	cfg RunConfig,
+	stateDir string,
 	mediaPath string,
 	ffmpegPath string,
 	transcriberPath string,
@@ -1978,13 +1991,30 @@ func processMediaFile(
 		defer os.Remove(wavPath)
 	}
 
-	transcript := strings.TrimSuffix(absMedia, filepath.Ext(absMedia)) + ".md"
+	paths, pathErr := runArtifactPaths(stateDir, runID, absMedia, cfg.OutputDir, cfg.ArtifactMode)
+	if pathErr != nil {
+		ae := newError("filesystem", "ARTIFACT_PATH_ERROR", pathErr.Error(), true, "Check --state-dir or --output-dir permissions")
+		fr.Error = &ae
+		return fr, warnings, &ae
+	}
+	transcript := paths.TranscriptTarget
 	terr := transcribeAudio(ctx, cfg, transcriberPath, modelPath, wavPath, transcript, outputMode, runID, absMedia, progress)
 	if terr != nil {
 		fr.Error = terr
 		return fr, warnings, terr
 	}
 	fr.Transcript = transcript
+	fr.ArtifactTranscript = paths.ArtifactTranscript
+	fr.LatestTranscript = paths.LatestTranscript
+	if paths.ShouldCopyLatest() {
+		if err := copyFile(paths.ArtifactTranscript, paths.LatestTranscript); err != nil {
+			ae := newError("filesystem", "LATEST_TRANSCRIPT_WRITE_FAILED", err.Error(), true, "Check --output-dir permissions or use --artifact-mode versioned")
+			fr.Error = &ae
+			return fr, warnings, &ae
+		}
+		fr.Transcript = paths.LatestTranscript
+		progress.Step("artifact.latest", fmt.Sprintf("Latest transcript written: %s", paths.LatestTranscript), map[string]any{"file": absMedia, "transcript": paths.LatestTranscript, "artifact_transcript": paths.ArtifactTranscript})
+	}
 
 	promptPath := ""
 	if cfg.Prompt != "" {
@@ -2007,7 +2037,7 @@ func processMediaFile(
 			fr.Error = &ae
 			return fr, warnings, &ae
 		}
-		desc := strings.TrimSuffix(absMedia, filepath.Ext(absMedia)) + "_description.md"
+		desc := paths.DescriptionTarget
 		progress.Step("description.start", fmt.Sprintf("Generating description: %s", filepath.Base(desc)), map[string]any{"file": absMedia, "prompt": promptPath})
 		dErr := generateDescription(ctx, llmPath, transcript, promptPath, desc)
 		if dErr != nil {
@@ -2015,6 +2045,16 @@ func processMediaFile(
 			return fr, warnings, dErr
 		}
 		fr.Description = desc
+		fr.ArtifactDescription = paths.ArtifactDescription
+		fr.LatestDescription = paths.LatestDescription
+		if paths.ShouldCopyLatest() {
+			if err := copyFile(paths.ArtifactDescription, paths.LatestDescription); err != nil {
+				ae := newError("filesystem", "LATEST_DESCRIPTION_WRITE_FAILED", err.Error(), true, "Check --output-dir permissions or use --artifact-mode versioned")
+				fr.Error = &ae
+				return fr, warnings, &ae
+			}
+			fr.Description = paths.LatestDescription
+		}
 		progress.Step("description.done", fmt.Sprintf("Description written: %s", desc), map[string]any{"file": absMedia, "description": desc})
 	} else {
 		warnings = append(warnings, Warning{Code: "PROMPT_NOT_SET", Message: fmt.Sprintf("No prompt found for %s; description generation skipped", absMedia)})
@@ -2107,6 +2147,87 @@ func detectAudioChannels(ctx context.Context, ffmpegPath string, input string) (
 		return 1, nil
 	}
 	return n, nil
+}
+
+type artifactPaths struct {
+	ArtifactTranscript  string
+	ArtifactDescription string
+	LatestTranscript    string
+	LatestDescription   string
+	TranscriptTarget    string
+	DescriptionTarget   string
+	Mode                string
+}
+
+func (p artifactPaths) ShouldCopyLatest() bool {
+	return p.Mode == "both"
+}
+
+func runArtifactPaths(stateDir string, runID string, absMedia string, outputDir string, mode string) (artifactPaths, error) {
+	mode = normalizeArtifactMode(mode)
+	if mode == "" {
+		mode = "both"
+	}
+	stem := strings.TrimSuffix(filepath.Base(absMedia), filepath.Ext(absMedia))
+	if strings.TrimSpace(stem) == "" {
+		stem = "transcript"
+	}
+	latestDir := strings.TrimSpace(outputDir)
+	if latestDir == "" {
+		latestDir = filepath.Dir(absMedia)
+	}
+	if err := os.MkdirAll(latestDir, 0o755); err != nil {
+		return artifactPaths{}, err
+	}
+	latestTranscript := filepath.Join(latestDir, stem+".md")
+	latestDescription := filepath.Join(latestDir, stem+"_description.md")
+
+	runDir := filepath.Join(stateDir, "runs", runID)
+	artifactStem := sanitizeFileName(stem) + "-" + shortPathHash(absMedia)
+	artifactTranscript := filepath.Join(runDir, artifactStem+".transcript.md")
+	artifactDescription := filepath.Join(runDir, artifactStem+".description.md")
+
+	out := artifactPaths{Mode: mode}
+	switch mode {
+	case "latest":
+		out.LatestTranscript = latestTranscript
+		out.LatestDescription = latestDescription
+		out.TranscriptTarget = latestTranscript
+		out.DescriptionTarget = latestDescription
+	case "versioned", "both":
+		if err := os.MkdirAll(runDir, 0o755); err != nil {
+			return artifactPaths{}, err
+		}
+		out.ArtifactTranscript = artifactTranscript
+		out.ArtifactDescription = artifactDescription
+		out.TranscriptTarget = artifactTranscript
+		out.DescriptionTarget = artifactDescription
+		if mode == "both" {
+			out.LatestTranscript = latestTranscript
+			out.LatestDescription = latestDescription
+		}
+	default:
+		return artifactPaths{}, fmt.Errorf("invalid artifact mode: %s", mode)
+	}
+	return out, nil
+}
+
+func normalizeArtifactMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "both":
+		return "both"
+	case "latest":
+		return "latest"
+	case "versioned":
+		return "versioned"
+	default:
+		return strings.ToLower(strings.TrimSpace(mode))
+	}
+}
+
+func shortPathHash(path string) string {
+	sum := sha256.Sum256([]byte(path))
+	return hex.EncodeToString(sum[:])[:8]
 }
 
 func transcribeAudio(ctx context.Context, cfg RunConfig, transcriberPath string, modelPath string, wavPath string, transcriptPath string, outputMode string, runID string, mediaPath string, progress *ProgressReporter) *AppError {
@@ -2847,6 +2968,12 @@ func validateRunInputs(cfg RunConfig) ([]Warning, *AppError) {
 		ae := newError("input", "INVALID_CLIPBOARD_MODE", "--clipboard must be one of never|ask|always", false, "Use --clipboard never, ask, or always")
 		return warnings, &ae
 	}
+	switch normalizeArtifactMode(cfg.ArtifactMode) {
+	case "latest", "versioned", "both":
+	default:
+		ae := newError("input", "INVALID_ARTIFACT_MODE", "--artifact-mode must be one of latest|versioned|both", false, "Use --artifact-mode both for latest and immutable artifacts")
+		return warnings, &ae
+	}
 
 	if cfg.Prompt != "" && !fileExists(cfg.Prompt) {
 		warnings = append(warnings, Warning{Code: "PROMPT_NOT_FOUND", Message: fmt.Sprintf("Prompt file not found: %s. Run will fall back to prompt.md.", cfg.Prompt)})
@@ -3148,6 +3275,9 @@ func retryRunArgs(global GlobalOptions, data RunData, input string) []string {
 	if data.FFmpegPath != "" {
 		args = append(args, "--ffmpeg-path", data.FFmpegPath)
 	}
+	if data.ArtifactMode != "" {
+		args = append(args, "--artifact-mode", data.ArtifactMode)
+	}
 	if input == "" {
 		input = data.Input
 	}
@@ -3212,13 +3342,15 @@ func saveHistoryRecord(stateDir string, env Envelope) error {
 		Files:          make([]history.FileRecord, 0, len(runData.Files)),
 	}
 	for _, file := range runData.Files {
+		transcriptPath := firstNonEmpty(file.ArtifactTranscript, file.Transcript)
+		descriptionPath := firstNonEmpty(file.ArtifactDescription, file.Description)
 		transcriptText := ""
-		if file.Transcript != "" {
-			transcriptText, _ = readOptionalTextFile(file.Transcript)
+		if transcriptPath != "" {
+			transcriptText, _ = readOptionalTextFile(transcriptPath)
 		}
 		descriptionText := ""
-		if file.Description != "" {
-			descriptionText, _ = readOptionalTextFile(file.Description)
+		if descriptionPath != "" {
+			descriptionText, _ = readOptionalTextFile(descriptionPath)
 		}
 		errorCode := ""
 		if file.Error != nil {
@@ -3226,8 +3358,8 @@ func saveHistoryRecord(stateDir string, env Envelope) error {
 		}
 		rec.Files = append(rec.Files, history.FileRecord{
 			File:            file.File,
-			TranscriptPath:  file.Transcript,
-			DescriptionPath: file.Description,
+			TranscriptPath:  transcriptPath,
+			DescriptionPath: descriptionPath,
 			Status:          file.Status,
 			Transcript:      transcriptText,
 			Description:     descriptionText,
@@ -3988,6 +4120,8 @@ Run Flags:
                              Deterministic manifest URL for runtime asset resolution
   --ffmpeg-path <path>      Use an explicit ffmpeg path
   --llm-path <path>         llm CLI path (description only)
+  --output-dir <path>       Directory for latest transcript/description files (default: next to input)
+  --artifact-mode <mode>    latest|versioned|both (default: both)
   --keep-temp               Keep intermediate WAV files
 
 Global Flags:
