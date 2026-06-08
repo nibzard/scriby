@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestModelFilenameNormalization(t *testing.T) {
@@ -55,6 +56,27 @@ func TestDefaultClipboardAndInteractivity(t *testing.T) {
 	global := defaultGlobalOptions()
 	if global.NonInteractive {
 		t.Fatal("defaultGlobalOptions().NonInteractive = true, want false")
+	}
+}
+
+func TestApplyAgentMode(t *testing.T) {
+	global := defaultGlobalOptions()
+	global.Agent = true
+	cfg := defaultRunConfig()
+
+	applyAgentMode(&global, &cfg)
+
+	if global.Output != "json" {
+		t.Fatalf("agent output = %q, want json", global.Output)
+	}
+	if !global.NonInteractive || !global.Yes {
+		t.Fatalf("agent global = %#v, want non-interactive and yes", global)
+	}
+	if cfg.Clipboard != "never" {
+		t.Fatalf("agent clipboard = %q, want never", cfg.Clipboard)
+	}
+	if cfg.StreamTranscript {
+		t.Fatal("agent mode should disable transcript streaming")
 	}
 }
 
@@ -294,6 +316,221 @@ func TestClipboardTranscriptPath(t *testing.T) {
 	}
 	if warn == nil || warn.Code != "CLIPBOARD_SKIPPED_MULTIPLE_TRANSCRIPTS" {
 		t.Fatalf("expected CLIPBOARD_SKIPPED_MULTIPLE_TRANSCRIPTS, got %#v", warn)
+	}
+}
+
+func TestHistoryRecordStoresTranscriptAndSearches(t *testing.T) {
+	stateDir := t.TempDir()
+	mediaDir := t.TempDir()
+	transcriptPath := filepath.Join(mediaDir, "meeting.md")
+	descriptionPath := filepath.Join(mediaDir, "meeting_description.md")
+	if err := os.WriteFile(transcriptPath, []byte("Discussed quarterly planning and customer discovery."), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+	if err := os.WriteFile(descriptionPath, []byte("Planning summary."), 0o644); err != nil {
+		t.Fatalf("write description: %v", err)
+	}
+
+	env := newEnvelope("run")
+	env.RunID = "20260224-120000-test"
+	env.Status = "succeeded"
+	env.Data = RunData{
+		Input:    mediaDir,
+		Engine:   "whisper",
+		ModelRef: "ggml-medium.bin",
+		Files: []FileResult{{
+			File:        filepath.Join(mediaDir, "meeting.wav"),
+			Transcript:  transcriptPath,
+			Description: descriptionPath,
+			Status:      "succeeded",
+		}},
+	}
+	env.Metrics["duration_ms"] = int64(42)
+	env.Metrics["files_total"] = int64(1)
+	env.Metrics["files_succeeded"] = int64(1)
+	env.Metrics["files_failed"] = int64(0)
+
+	if err := saveHistoryRecord(stateDir, env); err != nil {
+		t.Fatalf("saveHistoryRecord returned error: %v", err)
+	}
+
+	db, err := openHistoryDB(stateDir)
+	if err != nil {
+		t.Fatalf("openHistoryDB returned error: %v", err)
+	}
+	defer db.Close()
+
+	runs, err := listHistoryRuns(db, 10, "", nil)
+	if err != nil {
+		t.Fatalf("listHistoryRuns returned error: %v", err)
+	}
+	if len(runs) != 1 || runs[0].RunID != env.RunID {
+		t.Fatalf("history runs = %#v, want run_id %s", runs, env.RunID)
+	}
+
+	run, files, _, err := getHistoryRun(db, env.RunID, true)
+	if err != nil {
+		t.Fatalf("getHistoryRun returned error: %v", err)
+	}
+	if run.Engine != "whisper" || run.FilesSucceeded != 1 {
+		t.Fatalf("history run = %#v", run)
+	}
+	if len(files) != 1 || !strings.Contains(files[0].Transcript, "quarterly planning") {
+		t.Fatalf("history files = %#v", files)
+	}
+
+	matches, err := searchHistory(db, "customer discovery", 5, nil)
+	if err != nil {
+		t.Fatalf("searchHistory returned error: %v", err)
+	}
+	if len(matches) != 1 || matches[0].RunID != env.RunID {
+		t.Fatalf("history matches = %#v, want run_id %s", matches, env.RunID)
+	}
+
+	latest, err := latestHistoryRunID(db)
+	if err != nil {
+		t.Fatalf("latestHistoryRunID returned error: %v", err)
+	}
+	if latest != env.RunID {
+		t.Fatalf("latest run = %q, want %q", latest, env.RunID)
+	}
+
+	schema, err := historySchema(db)
+	if err != nil {
+		t.Fatalf("historySchema returned error: %v", err)
+	}
+	if _, ok := schema["runs"]; !ok {
+		t.Fatalf("schema missing runs table: %#v", schema)
+	}
+
+	md := exportHistoryMarkdown(run, files)
+	if !strings.Contains(md, "Scriby Run") || !strings.Contains(md, "quarterly planning") {
+		t.Fatalf("markdown export = %q", md)
+	}
+}
+
+func TestHistorySQLReadOnlyGuard(t *testing.T) {
+	if !isReadOnlyHistorySQL("select run_id from runs") {
+		t.Fatal("select should be accepted")
+	}
+	if !isReadOnlyHistorySQL("WITH recent AS (select * from runs) select * from recent") {
+		t.Fatal("with query should be accepted")
+	}
+	if isReadOnlyHistorySQL("delete from runs") {
+		t.Fatal("delete should be rejected")
+	}
+	if isReadOnlyHistorySQL("select * from runs; delete from runs") {
+		t.Fatal("multi-statement query should be rejected")
+	}
+}
+
+func TestHandleHistoryLatestExportSchema(t *testing.T) {
+	stateDir := t.TempDir()
+	mediaDir := t.TempDir()
+	transcriptPath := filepath.Join(mediaDir, "meeting.md")
+	if err := os.WriteFile(transcriptPath, []byte("Latest transcript for agent workflows."), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	env := newEnvelope("run")
+	env.RunID = "20260224-130000-test"
+	env.Status = "succeeded"
+	env.Data = RunData{
+		Input:            mediaDir,
+		Engine:           "whisper",
+		Language:         "en",
+		SampleRate:       16000,
+		StreamTranscript: false,
+		Files: []FileResult{{
+			File:       filepath.Join(mediaDir, "meeting.wav"),
+			Transcript: transcriptPath,
+			Status:     "succeeded",
+		}},
+	}
+	env.Metrics["duration_ms"] = int64(10)
+	env.Metrics["files_total"] = int64(1)
+	env.Metrics["files_succeeded"] = int64(1)
+	env.Metrics["files_failed"] = int64(0)
+	if err := saveHistoryRecord(stateDir, env); err != nil {
+		t.Fatalf("saveHistoryRecord returned error: %v", err)
+	}
+
+	latestEnv, code := handleHistory([]string{"--agent", "latest", "--state-dir", stateDir, "--transcript-only"})
+	if code != exitOK {
+		t.Fatalf("history latest code = %d env = %#v", code, latestEnv)
+	}
+	latestData, ok := latestEnv.Data.(map[string]any)
+	if !ok || latestData["run_id"] != env.RunID {
+		t.Fatalf("latest data = %#v", latestEnv.Data)
+	}
+
+	exportEnv, code := handleHistory([]string{"export", "--state-dir", stateDir, "--latest", "--format", "markdown"})
+	if code != exitOK {
+		t.Fatalf("history export code = %d env = %#v", code, exportEnv)
+	}
+	exportData, ok := exportEnv.Data.(map[string]any)
+	if !ok || !strings.Contains(exportData["content"].(string), "Latest transcript") {
+		t.Fatalf("export data = %#v", exportEnv.Data)
+	}
+
+	schemaEnv, code := handleHistory([]string{"schema", "--state-dir", stateDir})
+	if code != exitOK {
+		t.Fatalf("history schema code = %d env = %#v", code, schemaEnv)
+	}
+	schemaData, ok := schemaEnv.Data.(map[string]any)
+	if !ok || schemaData["schema"] == nil {
+		t.Fatalf("schema data = %#v", schemaEnv.Data)
+	}
+}
+
+func TestParseSince(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	got, err := parseSince("7d", now)
+	if err != nil {
+		t.Fatalf("parseSince returned error: %v", err)
+	}
+	want := now.Add(-7 * 24 * time.Hour)
+	if !got.Equal(want) {
+		t.Fatalf("parseSince(7d) = %s, want %s", got, want)
+	}
+	if _, err := parseSince("nope", now); err == nil {
+		t.Fatal("parseSince should reject invalid values")
+	}
+}
+
+func TestRetryRunArgsAndFailedInputs(t *testing.T) {
+	global := defaultGlobalOptions()
+	global.Agent = true
+	global.Output = "json"
+	global.NonInteractive = true
+	global.Yes = true
+	global.StateDir = "/tmp/scriby-state"
+	data := RunData{
+		Input:            "/tmp/input",
+		Engine:           "whisper",
+		Language:         "en",
+		Clipboard:        "ask",
+		MonoMode:         "average",
+		SampleRate:       16000,
+		StreamTranscript: true,
+		ModelName:        "medium",
+		Files: []FileResult{
+			{File: "/tmp/a.wav", Status: "failed"},
+			{File: "/tmp/b.wav", Status: "succeeded"},
+		},
+	}
+
+	inputs := failedRunInputs(data.Files)
+	if len(inputs) != 1 || inputs[0] != "/tmp/a.wav" {
+		t.Fatalf("failedRunInputs = %#v", inputs)
+	}
+
+	args := retryRunArgs(global, data, inputs[0])
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--agent", "--clipboard never", "--stream-transcript=false", "/tmp/a.wav"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("retry args %q missing %q", joined, want)
+		}
 	}
 }
 

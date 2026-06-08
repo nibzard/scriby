@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -96,6 +99,7 @@ type Envelope struct {
 
 type GlobalOptions struct {
 	Output         string
+	Agent          bool
 	Strict         bool
 	NonInteractive bool
 	Yes            bool
@@ -181,14 +185,23 @@ func (p *ProgressReporter) Step(event string, message string, data map[string]an
 }
 
 type RunData struct {
-	Input           string       `json:"input"`
-	Engine          string       `json:"engine"`
-	FFmpegPath      string       `json:"ffmpeg_path"`
-	TranscriberPath string       `json:"transcriber_path,omitempty"`
-	ModelRef        string       `json:"model_ref,omitempty"`
-	WhisperPath     string       `json:"whisper_path,omitempty"`
-	ModelPath       string       `json:"model_path,omitempty"`
-	Files           []FileResult `json:"files"`
+	Input            string       `json:"input"`
+	Prompt           string       `json:"prompt,omitempty"`
+	Engine           string       `json:"engine"`
+	Language         string       `json:"language,omitempty"`
+	Clipboard        string       `json:"clipboard,omitempty"`
+	MonoMode         string       `json:"mono_mode,omitempty"`
+	SampleRate       int          `json:"sample_rate,omitempty"`
+	Timestamps       bool         `json:"timestamps,omitempty"`
+	StreamTranscript bool         `json:"stream_transcript,omitempty"`
+	FFmpegPath       string       `json:"ffmpeg_path"`
+	TranscriberPath  string       `json:"transcriber_path,omitempty"`
+	ModelRef         string       `json:"model_ref,omitempty"`
+	ModelName        string       `json:"model_name,omitempty"`
+	HFModelID        string       `json:"hf_model_id,omitempty"`
+	WhisperPath      string       `json:"whisper_path,omitempty"`
+	ModelPath        string       `json:"model_path,omitempty"`
+	Files            []FileResult `json:"files"`
 }
 
 type FileResult struct {
@@ -204,6 +217,43 @@ type DoctorCheck struct {
 	Name    string `json:"name"`
 	Status  string `json:"status"`
 	Details string `json:"details"`
+}
+
+type HistoryRun struct {
+	RunID          string `json:"run_id"`
+	CreatedAt      string `json:"created_at"`
+	Status         string `json:"status"`
+	Input          string `json:"input,omitempty"`
+	Engine         string `json:"engine,omitempty"`
+	ModelRef       string `json:"model_ref,omitempty"`
+	FilesTotal     int64  `json:"files_total"`
+	FilesSucceeded int64  `json:"files_succeeded"`
+	FilesFailed    int64  `json:"files_failed"`
+	DurationMS     int64  `json:"duration_ms"`
+}
+
+type HistoryTranscription struct {
+	RunID           string `json:"run_id"`
+	CreatedAt       string `json:"created_at"`
+	File            string `json:"file"`
+	TranscriptPath  string `json:"transcript_path,omitempty"`
+	DescriptionPath string `json:"description_path,omitempty"`
+	Status          string `json:"status"`
+	Transcript      string `json:"transcript,omitempty"`
+	Description     string `json:"description,omitempty"`
+	ErrorCode       string `json:"error_code,omitempty"`
+}
+
+type StoredRunEnvelope struct {
+	SchemaVersion string         `json:"schema_version"`
+	Command       string         `json:"command"`
+	Status        string         `json:"status"`
+	RunID         string         `json:"run_id"`
+	SessionID     string         `json:"session_id,omitempty"`
+	Data          RunData        `json:"data"`
+	Errors        []AppError     `json:"errors,omitempty"`
+	Warnings      []Warning      `json:"warnings,omitempty"`
+	Metrics       map[string]any `json:"metrics,omitempty"`
 }
 
 func main() {
@@ -259,8 +309,16 @@ func main() {
 		env, code := handleReplay(args)
 		_ = printCommandResult(env, args)
 		os.Exit(code)
+	case "retry":
+		env, code := handleRetry(args)
+		_ = printCommandResult(env, args)
+		os.Exit(code)
 	case "models":
 		env, code := handleModels(args)
+		_ = printCommandResult(env, args)
+		os.Exit(code)
+	case "history":
+		env, code := handleHistory(args)
 		_ = printCommandResult(env, args)
 		os.Exit(code)
 	default:
@@ -281,10 +339,13 @@ Commands:
   validate   Validate inputs and runtime readiness without running transcription
   doctor     Diagnose local environment and suggest deterministic remediations
   replay     Replay a saved run envelope by run_id
+  retry      Retry a saved transcription run
   models     Manage local whisper model files (pull, list, prune)
+  history    Explore local run/transcription history in SQLite
 
 Global Contract:
   - Output modes: --output json|jsonl|text (default: json)
+  - Agent shortcut: --agent implies --output json, --non-interactive, --yes, and disables run clipboard prompts
   - Stable envelope: schema_version, command, status, run_id, data, errors, warnings, metrics
   - Deterministic exit codes:
       0 success, 2 input error, 3 dependency/setup error, 4 runtime failure, 5 partial success, 10 internal error
@@ -292,11 +353,14 @@ Global Contract:
 Examples:
   scriby run ./lecture.mp4
   scriby run --engine cohere --language en ./lecture.mp4
+  scriby run --agent ./lecture.mp4
   scriby run --prompt ./youtube-description.md ./podcast.wav
   scriby validate --strict ./recordings
   scriby doctor --output text
   scriby models pull --name medium
   scriby replay 20260224-abc123
+  scriby retry 20260224-abc123 --failed-only
+  scriby history search "quarterly planning"
 `
 }
 
@@ -328,6 +392,7 @@ func newEnvelope(command string) Envelope {
 func defaultGlobalOptions() GlobalOptions {
 	return GlobalOptions{
 		Output:         envOr("SCRIBY_OUTPUT", "json"),
+		Agent:          envBool("SCRIBY_AGENT", false),
 		Strict:         envBool("SCRIBY_STRICT", false),
 		NonInteractive: envBool("SCRIBY_NON_INTERACTIVE", false),
 		Yes:            envBool("SCRIBY_YES", false),
@@ -364,6 +429,7 @@ func defaultRunConfig() RunConfig {
 
 func addGlobalFlags(fs *flag.FlagSet, g *GlobalOptions) {
 	fs.StringVar(&g.Output, "output", g.Output, "Output mode: json|jsonl|text")
+	fs.BoolVar(&g.Agent, "agent", g.Agent, "Agent mode: JSON output, non-interactive prompts, clipboard disabled for run")
 	fs.BoolVar(&g.Strict, "strict", g.Strict, "Disable silent fallbacks and enforce strict contract behavior")
 	fs.BoolVar(&g.NonInteractive, "non-interactive", g.NonInteractive, "Disable interactive prompts")
 	fs.BoolVar(&g.Yes, "yes", g.Yes, "Assume yes for destructive operations")
@@ -373,6 +439,22 @@ func addGlobalFlags(fs *flag.FlagSet, g *GlobalOptions) {
 	fs.StringVar(&g.SessionPolicy, "session-policy", g.SessionPolicy, "Session policy: ephemeral|sticky|resume")
 	fs.StringVar(&g.SessionID, "session-id", g.SessionID, "Session identifier for sticky/resume sessions")
 	fs.StringVar(&g.StateDir, "state-dir", g.StateDir, "State directory (models, runtime, runs)")
+}
+
+func applyAgentMode(global *GlobalOptions, cfg *RunConfig) {
+	if global == nil || !global.Agent {
+		return
+	}
+	global.Output = "json"
+	global.NonInteractive = true
+	global.Yes = true
+	if global.MaxRetries < 1 {
+		global.MaxRetries = 1
+	}
+	if cfg != nil {
+		cfg.Clipboard = "never"
+		cfg.StreamTranscript = false
+	}
 }
 
 func addRunFlags(fs *flag.FlagSet, cfg *RunConfig) {
@@ -432,6 +514,7 @@ func handleRun(args []string) (Envelope, int) {
 	if help {
 		return finishHelp(&env, started, runHelp())
 	}
+	applyAgentMode(&global, &cfg)
 
 	if !isValidOutputMode(global.Output) {
 		env.Status = "failed"
@@ -581,14 +664,23 @@ func handleRun(args []string) (Envelope, int) {
 	}
 
 	runData := RunData{
-		Input:           cfg.Input,
-		Engine:          engine,
-		FFmpegPath:      ffmpegPath,
-		TranscriberPath: transcriberPath,
-		ModelRef:        modelRef,
-		WhisperPath:     whisperPath,
-		ModelPath:       modelPath,
-		Files:           make([]FileResult, 0, len(files)),
+		Input:            cfg.Input,
+		Prompt:           cfg.Prompt,
+		Engine:           engine,
+		Language:         cfg.Language,
+		Clipboard:        cfg.Clipboard,
+		MonoMode:         cfg.MonoMode,
+		SampleRate:       cfg.SampleRate,
+		Timestamps:       cfg.Timestamps,
+		StreamTranscript: cfg.StreamTranscript,
+		FFmpegPath:       ffmpegPath,
+		TranscriberPath:  transcriberPath,
+		ModelRef:         modelRef,
+		ModelName:        cfg.ModelName,
+		HFModelID:        cfg.HFModelID,
+		WhisperPath:      whisperPath,
+		ModelPath:        modelPath,
+		Files:            make([]FileResult, 0, len(files)),
 	}
 
 	var successes int64
@@ -630,12 +722,12 @@ func handleRun(args []string) (Envelope, int) {
 		env.Status = "failed"
 	}
 
+	finishEnvelope(&env, started, int64(len(files)), successes, failures)
 	if global.IdempotencyKey != "" {
 		_ = saveIdempotencyRecord(stateDir, "run", global.IdempotencyKey, env)
 	}
 	_ = saveRunRecord(stateDir, env)
-
-	finishEnvelope(&env, started, int64(len(files)), successes, failures)
+	_ = saveHistoryRecord(stateDir, env)
 	progress.Step(
 		"run.done",
 		fmt.Sprintf("Run finished with status %s (%d succeeded, %d failed)", env.Status, successes, failures),
@@ -669,6 +761,7 @@ func handleValidate(args []string) (Envelope, int) {
 	if help {
 		return finishHelp(&env, started, validateHelp())
 	}
+	applyAgentMode(&global, &cfg)
 	if !isValidOutputMode(global.Output) {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "INVALID_OUTPUT_MODE", "--output must be one of json|jsonl|text", false, "Set --output json, --output jsonl, or --output text")}
@@ -805,6 +898,7 @@ func handleDoctor(args []string) (Envelope, int) {
 	if help {
 		return finishHelp(&env, started, doctorHelp())
 	}
+	applyAgentMode(&global, nil)
 
 	stateDir, err := ensureStateDir(global.StateDir)
 	if err != nil {
@@ -909,6 +1003,7 @@ func handleReplay(args []string) (Envelope, int) {
 	if help {
 		return finishHelp(&env, started, replayHelp())
 	}
+	applyAgentMode(&global, nil)
 
 	pos := fs.Args()
 	if len(pos) != 1 {
@@ -953,19 +1048,127 @@ func handleReplay(args []string) (Envelope, int) {
 	return env, exitOK
 }
 
+func handleRetry(args []string) (Envelope, int) {
+	started := time.Now()
+	env := newEnvelope("retry")
+	global := defaultGlobalOptions()
+	failedOnly := false
+	var help bool
+
+	fs := flag.NewFlagSet("retry", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addGlobalFlags(fs, &global)
+	fs.BoolVar(&failedOnly, "failed-only", failedOnly, "Retry only files that failed in the saved run")
+	addHelpFlags(fs, &help)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, retryHelp())
+		}
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby retry --help' for usage")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if help {
+		return finishHelp(&env, started, retryHelp())
+	}
+	applyAgentMode(&global, nil)
+
+	pos := fs.Args()
+	if len(pos) != 1 {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "MISSING_RUN_ID", "retry requires exactly one <run_id>", false, "Usage: scriby retry [flags] <run_id>")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+
+	stateDir, err := ensureStateDir(global.StateDir)
+	if err != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("filesystem", "STATE_DIR_ERROR", err.Error(), false, "Set --state-dir to a writable directory")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitDependency
+	}
+	global.StateDir = stateDir
+
+	stored, err := loadStoredRunRecord(stateDir, pos[0])
+	if err != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "RUN_NOT_FOUND", fmt.Sprintf("run_id not found or not retryable: %s", pos[0]), false, "Use scriby history list to find run IDs")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if stored.Data.Input == "" {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "RUN_NOT_RETRYABLE", "saved run does not include retryable run data", false, "Run with the current Scriby version, then retry the new run_id")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+
+	inputs := []string{stored.Data.Input}
+	if failedOnly {
+		inputs = failedRunInputs(stored.Data.Files)
+		if len(inputs) == 0 {
+			env.Status = "succeeded"
+			env.Warnings = []Warning{{Code: "NO_FAILED_FILES", Message: "No failed files were found in the saved run"}}
+			env.Data = map[string]any{"retried_from": stored.RunID, "retried_runs": []Envelope{}}
+			finishEnvelope(&env, started, 0, 0, 0)
+			return env, exitOK
+		}
+	}
+
+	retried := []Envelope{}
+	successes := int64(0)
+	failures := int64(0)
+	for _, input := range inputs {
+		runArgs := retryRunArgs(global, stored.Data, input)
+		retryEnv, code := handleRun(runArgs)
+		retried = append(retried, retryEnv)
+		if code == exitOK {
+			successes++
+		} else {
+			failures++
+		}
+	}
+
+	if failures == 0 {
+		env.Status = "succeeded"
+	} else if successes > 0 {
+		env.Status = "partial"
+	} else {
+		env.Status = "failed"
+	}
+	env.Data = map[string]any{"retried_from": stored.RunID, "failed_only": failedOnly, "retried_runs": retried}
+	finishEnvelope(&env, started, int64(len(inputs)), successes, failures)
+	_ = saveRunRecord(stateDir, env)
+	return env, exitFromStatus(env.Status)
+}
+
 func handleModels(args []string) (Envelope, int) {
 	started := time.Now()
 	env := newEnvelope("models")
 
-	if len(args) == 0 {
+	leadingGlobalArgs, remainingArgs, help, parseErr := splitRootArgs(args)
+	if parseErr != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", parseErr.Error(), false, "Run 'scriby models --help'")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if help && len(remainingArgs) == 0 {
+		env.Data = modelsHelp()
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitOK
+	}
+	if len(remainingArgs) == 0 {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "MISSING_MODELS_COMMAND", "models command requires one of: pull|list|prune", false, "Usage: scriby models <pull|list|prune> [flags]")}
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitInput
 	}
 
-	sub := args[0]
-	subArgs := args[1:]
+	sub := remainingArgs[0]
+	subArgs := append(append([]string{}, leadingGlobalArgs...), remainingArgs[1:]...)
 	switch sub {
 	case "pull":
 		return handleModelsPull(subArgs, started)
@@ -1010,6 +1213,7 @@ func handleModelsPull(args []string, started time.Time) (Envelope, int) {
 	if help {
 		return finishHelp(&env, started, modelsHelp())
 	}
+	applyAgentMode(&global, nil)
 	if !isValidOutputMode(global.Output) {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "INVALID_OUTPUT_MODE", "--output must be one of json|jsonl|text", false, "Set --output json, --output jsonl, or --output text")}
@@ -1064,6 +1268,7 @@ func handleModelsList(args []string, started time.Time) (Envelope, int) {
 	if help {
 		return finishHelp(&env, started, modelsHelp())
 	}
+	applyAgentMode(&global, nil)
 	if !isValidOutputMode(global.Output) {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "INVALID_OUTPUT_MODE", "--output must be one of json|jsonl|text", false, "Set --output json, --output jsonl, or --output text")}
@@ -1129,6 +1334,7 @@ func handleModelsPrune(args []string, started time.Time) (Envelope, int) {
 	if help {
 		return finishHelp(&env, started, modelsHelp())
 	}
+	applyAgentMode(&global, nil)
 	if !isValidOutputMode(global.Output) {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "INVALID_OUTPUT_MODE", "--output must be one of json|jsonl|text", false, "Set --output json, --output jsonl, or --output text")}
@@ -1184,6 +1390,559 @@ func handleModelsPrune(args []string, started time.Time) (Envelope, int) {
 	return env, exitOK
 }
 
+func handleHistory(args []string) (Envelope, int) {
+	started := time.Now()
+	env := newEnvelope("history")
+
+	leadingGlobalArgs, remainingArgs, help, parseErr := splitRootArgs(args)
+	if parseErr != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", parseErr.Error(), false, "Run 'scriby history --help'")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if help && len(remainingArgs) == 0 {
+		env.Data = historyHelp()
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitOK
+	}
+	if len(remainingArgs) == 0 {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "MISSING_HISTORY_COMMAND", "history command requires one of: path|list|latest|show|search|export|schema|sql", false, "Usage: scriby history <path|list|latest|show|search|export|schema|sql> [flags]")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+
+	sub := remainingArgs[0]
+	subArgs := append(append([]string{}, leadingGlobalArgs...), remainingArgs[1:]...)
+	switch sub {
+	case "path":
+		return handleHistoryPath(subArgs, started)
+	case "list":
+		return handleHistoryList(subArgs, started)
+	case "latest":
+		return handleHistoryLatest(subArgs, started)
+	case "show":
+		return handleHistoryShow(subArgs, started)
+	case "search":
+		return handleHistorySearch(subArgs, started)
+	case "export":
+		return handleHistoryExport(subArgs, started)
+	case "schema":
+		return handleHistorySchema(subArgs, started)
+	case "sql":
+		return handleHistorySQL(subArgs, started)
+	case "help", "--help", "-h":
+		env.Data = historyHelp()
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitOK
+	default:
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "UNKNOWN_HISTORY_COMMAND", fmt.Sprintf("unknown history subcommand: %s", sub), false, "Usage: scriby history <path|list|latest|show|search|export|schema|sql> [flags]")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+}
+
+func handleHistoryPath(args []string, started time.Time) (Envelope, int) {
+	env := newEnvelope("history.path")
+	global := defaultGlobalOptions()
+	var help bool
+
+	fs := flag.NewFlagSet("history path", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addGlobalFlags(fs, &global)
+	addHelpFlags(fs, &help)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, historyHelp())
+		}
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby history path --help'")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if help {
+		return finishHelp(&env, started, historyHelp())
+	}
+	applyAgentMode(&global, nil)
+
+	stateDir, err := ensureStateDir(global.StateDir)
+	if err != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("filesystem", "STATE_DIR_ERROR", err.Error(), false, "Set --state-dir to a writable directory")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitDependency
+	}
+	db, err := openHistoryDB(stateDir)
+	if err != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("filesystem", "HISTORY_DB_ERROR", err.Error(), false, "Check the SQLite database path or set --state-dir")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitDependency
+	}
+	_ = db.Close()
+	env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir)}
+	finishEnvelope(&env, started, 0, 0, 0)
+	return env, exitOK
+}
+
+func handleHistoryList(args []string, started time.Time) (Envelope, int) {
+	env := newEnvelope("history.list")
+	global := defaultGlobalOptions()
+	limit := 20
+	status := ""
+	since := ""
+	var help bool
+
+	fs := flag.NewFlagSet("history list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addGlobalFlags(fs, &global)
+	fs.IntVar(&limit, "limit", limit, "Maximum runs to return")
+	fs.StringVar(&status, "status", status, "Filter by status: succeeded|partial|failed")
+	fs.StringVar(&since, "since", since, "Filter runs since RFC3339 date or duration like 7d, 24h")
+	addHelpFlags(fs, &help)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, historyHelp())
+		}
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby history list --help'")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if help {
+		return finishHelp(&env, started, historyHelp())
+	}
+	applyAgentMode(&global, nil)
+	if limit <= 0 {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "INVALID_LIMIT", "--limit must be a positive integer", false, "Set --limit 20")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if status != "" && status != "succeeded" && status != "partial" && status != "failed" {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "INVALID_STATUS", "--status must be one of succeeded|partial|failed", false, "Omit --status or use a supported value")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	sinceTime, serr := parseSince(since, time.Now())
+	if serr != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "INVALID_SINCE", serr.Error(), false, "Use --since 7d, --since 24h, or an RFC3339 timestamp")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+
+	db, stateDir, herr := openHistoryCommandDB(global)
+	if herr != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{*herr}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitDependency
+	}
+	defer db.Close()
+
+	runs, err := listHistoryRuns(db, limit, status, sinceTime)
+	if err != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("filesystem", "HISTORY_QUERY_FAILED", err.Error(), false, "Check the SQLite database")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitRuntime
+	}
+	env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir), "runs": runs}
+	env.Metrics["rows_total"] = len(runs)
+	finishEnvelope(&env, started, 0, 0, 0)
+	return env, exitOK
+}
+
+func handleHistoryLatest(args []string, started time.Time) (Envelope, int) {
+	env := newEnvelope("history.latest")
+	global := defaultGlobalOptions()
+	includeTranscript := true
+	transcriptOnly := false
+	var help bool
+
+	fs := flag.NewFlagSet("history latest", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addGlobalFlags(fs, &global)
+	fs.BoolVar(&includeTranscript, "include-transcript", includeTranscript, "Include transcript and description text")
+	fs.BoolVar(&transcriptOnly, "transcript-only", transcriptOnly, "Return only transcript text for the latest run")
+	addHelpFlags(fs, &help)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, historyHelp())
+		}
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby history latest --help'")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if help {
+		return finishHelp(&env, started, historyHelp())
+	}
+	applyAgentMode(&global, nil)
+	if transcriptOnly {
+		includeTranscript = true
+	}
+
+	db, stateDir, herr := openHistoryCommandDB(global)
+	if herr != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{*herr}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitDependency
+	}
+	defer db.Close()
+
+	runID, err := latestHistoryRunID(db)
+	if err != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "RUN_NOT_FOUND", "no history runs found", false, "Run scriby run first")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	run, files, envelopeJSON, err := getHistoryRun(db, runID, includeTranscript)
+	if err != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "RUN_NOT_FOUND", fmt.Sprintf("run_id not found: %s", runID), false, "Use scriby history list to find run IDs")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if transcriptOnly {
+		env.Data = map[string]any{"run_id": run.RunID, "transcripts": transcriptsOnly(files)}
+	} else {
+		var replayed Envelope
+		if envelopeJSON != "" {
+			_ = json.Unmarshal([]byte(envelopeJSON), &replayed)
+		}
+		env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir), "run": run, "files": files, "envelope": replayed}
+	}
+	env.Metrics["rows_total"] = len(files)
+	finishEnvelope(&env, started, 0, 0, 0)
+	return env, exitOK
+}
+
+func handleHistoryShow(args []string, started time.Time) (Envelope, int) {
+	env := newEnvelope("history.show")
+	global := defaultGlobalOptions()
+	includeTranscript := true
+	transcriptOnly := false
+	var help bool
+
+	fs := flag.NewFlagSet("history show", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addGlobalFlags(fs, &global)
+	fs.BoolVar(&includeTranscript, "include-transcript", includeTranscript, "Include transcript and description text")
+	fs.BoolVar(&transcriptOnly, "transcript-only", transcriptOnly, "Return only transcript text")
+	addHelpFlags(fs, &help)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, historyHelp())
+		}
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby history show --help'")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if help {
+		return finishHelp(&env, started, historyHelp())
+	}
+	applyAgentMode(&global, nil)
+	if transcriptOnly {
+		includeTranscript = true
+	}
+	pos := fs.Args()
+	if len(pos) != 1 {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "MISSING_RUN_ID", "history show requires exactly one <run_id>", false, "Usage: scriby history show <run_id>")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+
+	db, stateDir, herr := openHistoryCommandDB(global)
+	if herr != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{*herr}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitDependency
+	}
+	defer db.Close()
+
+	run, files, envelopeJSON, err := getHistoryRun(db, pos[0], includeTranscript)
+	if err != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "RUN_NOT_FOUND", fmt.Sprintf("run_id not found: %s", pos[0]), false, "Use scriby history list to find run IDs")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if transcriptOnly {
+		env.Data = map[string]any{"run_id": run.RunID, "transcripts": transcriptsOnly(files)}
+	} else {
+		var replayed Envelope
+		if envelopeJSON != "" {
+			_ = json.Unmarshal([]byte(envelopeJSON), &replayed)
+		}
+		env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir), "run": run, "files": files, "envelope": replayed}
+	}
+	env.Metrics["rows_total"] = len(files)
+	finishEnvelope(&env, started, 0, 0, 0)
+	return env, exitOK
+}
+
+func handleHistorySearch(args []string, started time.Time) (Envelope, int) {
+	env := newEnvelope("history.search")
+	global := defaultGlobalOptions()
+	limit := 20
+	since := ""
+	var help bool
+
+	fs := flag.NewFlagSet("history search", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addGlobalFlags(fs, &global)
+	fs.IntVar(&limit, "limit", limit, "Maximum matches to return")
+	fs.StringVar(&since, "since", since, "Filter matches since RFC3339 date or duration like 7d, 24h")
+	addHelpFlags(fs, &help)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, historyHelp())
+		}
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby history search --help'")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if help {
+		return finishHelp(&env, started, historyHelp())
+	}
+	applyAgentMode(&global, nil)
+	pos := fs.Args()
+	if len(pos) != 1 || strings.TrimSpace(pos[0]) == "" {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "MISSING_QUERY", "history search requires exactly one <query>", false, "Usage: scriby history search \"meeting topic\"")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if limit <= 0 {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "INVALID_LIMIT", "--limit must be a positive integer", false, "Set --limit 20")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	sinceTime, serr := parseSince(since, time.Now())
+	if serr != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "INVALID_SINCE", serr.Error(), false, "Use --since 7d, --since 24h, or an RFC3339 timestamp")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+
+	db, stateDir, herr := openHistoryCommandDB(global)
+	if herr != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{*herr}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitDependency
+	}
+	defer db.Close()
+
+	matches, err := searchHistory(db, pos[0], limit, sinceTime)
+	if err != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("filesystem", "HISTORY_QUERY_FAILED", err.Error(), false, "Check the SQLite database")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitRuntime
+	}
+	env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir), "query": pos[0], "matches": matches}
+	env.Metrics["rows_total"] = len(matches)
+	finishEnvelope(&env, started, 0, 0, 0)
+	return env, exitOK
+}
+
+func handleHistoryExport(args []string, started time.Time) (Envelope, int) {
+	env := newEnvelope("history.export")
+	global := defaultGlobalOptions()
+	format := "markdown"
+	latest := false
+	var help bool
+
+	fs := flag.NewFlagSet("history export", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addGlobalFlags(fs, &global)
+	fs.StringVar(&format, "format", format, "Export format: markdown|json")
+	fs.BoolVar(&latest, "latest", latest, "Export the latest run")
+	addHelpFlags(fs, &help)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, historyHelp())
+		}
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby history export --help'")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if help {
+		return finishHelp(&env, started, historyHelp())
+	}
+	applyAgentMode(&global, nil)
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format != "markdown" && format != "json" {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "INVALID_FORMAT", "--format must be markdown or json", false, "Use --format markdown or --format json")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	pos := fs.Args()
+	if len(pos) > 1 || (!latest && len(pos) != 1) || (latest && len(pos) != 0) {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "MISSING_RUN_ID", "history export requires <run_id> or --latest", false, "Usage: scriby history export <run_id> --format markdown")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+
+	db, stateDir, herr := openHistoryCommandDB(global)
+	if herr != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{*herr}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitDependency
+	}
+	defer db.Close()
+
+	runID := ""
+	if latest {
+		id, err := latestHistoryRunID(db)
+		if err != nil {
+			env.Status = "failed"
+			env.Errors = []AppError{newError("input", "RUN_NOT_FOUND", "no history runs found", false, "Run scriby run first")}
+			finishEnvelope(&env, started, 0, 0, 0)
+			return env, exitInput
+		}
+		runID = id
+	} else {
+		runID = pos[0]
+	}
+	run, files, _, err := getHistoryRun(db, runID, true)
+	if err != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "RUN_NOT_FOUND", fmt.Sprintf("run_id not found: %s", runID), false, "Use scriby history list to find run IDs")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if format == "json" {
+		env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir), "run": run, "files": files}
+	} else {
+		env.Data = map[string]any{"run_id": run.RunID, "format": format, "content": exportHistoryMarkdown(run, files)}
+	}
+	env.Metrics["rows_total"] = len(files)
+	finishEnvelope(&env, started, 0, 0, 0)
+	return env, exitOK
+}
+
+func handleHistorySchema(args []string, started time.Time) (Envelope, int) {
+	env := newEnvelope("history.schema")
+	global := defaultGlobalOptions()
+	var help bool
+
+	fs := flag.NewFlagSet("history schema", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addGlobalFlags(fs, &global)
+	addHelpFlags(fs, &help)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, historyHelp())
+		}
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby history schema --help'")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if help {
+		return finishHelp(&env, started, historyHelp())
+	}
+	applyAgentMode(&global, nil)
+
+	db, stateDir, herr := openHistoryCommandDB(global)
+	if herr != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{*herr}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitDependency
+	}
+	defer db.Close()
+
+	schema, err := historySchema(db)
+	if err != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("filesystem", "HISTORY_SCHEMA_FAILED", err.Error(), false, "Check the SQLite database")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitRuntime
+	}
+	env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir), "schema": schema}
+	env.Metrics["rows_total"] = len(schema)
+	finishEnvelope(&env, started, 0, 0, 0)
+	return env, exitOK
+}
+
+func handleHistorySQL(args []string, started time.Time) (Envelope, int) {
+	env := newEnvelope("history.sql")
+	global := defaultGlobalOptions()
+	var help bool
+
+	fs := flag.NewFlagSet("history sql", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addGlobalFlags(fs, &global)
+	addHelpFlags(fs, &help)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return finishHelp(&env, started, historyHelp())
+		}
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "FLAG_PARSE_ERROR", err.Error(), false, "Run 'scriby history sql --help'")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if help {
+		return finishHelp(&env, started, historyHelp())
+	}
+	applyAgentMode(&global, nil)
+	query := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	if query == "" {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "MISSING_SQL", "history sql requires a read-only SQL statement", false, "Example: scriby history sql \"select run_id,status from runs limit 5\"")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+	if !isReadOnlyHistorySQL(query) {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("input", "UNSAFE_SQL", "history sql only accepts read-only SELECT, WITH, or PRAGMA statements", false, "Use sqlite directly if you need to mutate the database")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
+
+	db, stateDir, herr := openHistoryCommandDB(global)
+	if herr != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{*herr}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitDependency
+	}
+	defer db.Close()
+
+	rows, err := queryHistorySQL(db, query)
+	if err != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{newError("filesystem", "HISTORY_SQL_FAILED", err.Error(), false, "Check the SQL statement")}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitRuntime
+	}
+	env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir), "rows": rows}
+	env.Metrics["rows_total"] = len(rows)
+	finishEnvelope(&env, started, 0, 0, 0)
+	return env, exitOK
+}
+
 func processMediaFile(
 	ctx context.Context,
 	cfg RunConfig,
@@ -1206,6 +1965,7 @@ func processMediaFile(
 		fr.Error = &ae
 		return fr, warnings, &ae
 	}
+	fr.File = absMedia
 
 	progress.Step("convert.start", fmt.Sprintf("Converting audio: %s", filepath.Base(absMedia)), map[string]any{"file": absMedia, "sample_rate": cfg.SampleRate})
 	wavPath, convertWarn, cerr := convertToTempWAV(ctx, ffmpegPath, absMedia, cfg.SampleRate, cfg.MonoMode)
@@ -1600,7 +2360,6 @@ func ensureMLXAudioRuntime() (string, *AppError) {
 	}
 	return uvPath, nil
 }
-
 
 func loadRuntimeManifest(ctx context.Context, manifestURL string, maxRetries int, progress *ProgressReporter) (RuntimeManifest, error) {
 	tmp, err := os.CreateTemp("", "scriby-runtime-manifest-*.json")
@@ -2002,15 +2761,11 @@ func ensureStateDir(explicit string) (string, error) {
 		return ap, nil
 	}
 
-	base, err := os.UserCacheDir()
-	if err != nil || base == "" {
-		home, hErr := os.UserHomeDir()
-		if hErr != nil {
-			return "", errors.New("unable to determine state dir")
-		}
-		base = filepath.Join(home, ".scriby")
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", errors.New("unable to determine state dir")
 	}
-	stateDir := filepath.Join(base, "scriby")
+	stateDir := filepath.Join(home, ".scriby")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		return "", err
 	}
@@ -2354,6 +3109,568 @@ func loadIdempotencyRecord(stateDir string, command string, key string) (Envelop
 	return env, true
 }
 
+func loadStoredRunRecord(stateDir string, runID string) (StoredRunEnvelope, error) {
+	path := filepath.Join(stateDir, "runs", runID+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		db, dbErr := openHistoryDB(stateDir)
+		if dbErr != nil {
+			return StoredRunEnvelope{}, err
+		}
+		defer db.Close()
+		if scanErr := db.QueryRow(`SELECT envelope_json FROM runs WHERE run_id = ?`, runID).Scan(&b); scanErr != nil {
+			return StoredRunEnvelope{}, err
+		}
+	}
+	var stored StoredRunEnvelope
+	if err := json.Unmarshal(b, &stored); err != nil {
+		return StoredRunEnvelope{}, err
+	}
+	if stored.Command != "run" {
+		return StoredRunEnvelope{}, fmt.Errorf("run_id %s is command %s, not run", runID, stored.Command)
+	}
+	return stored, nil
+}
+
+func failedRunInputs(files []FileResult) []string {
+	inputs := []string{}
+	seen := map[string]bool{}
+	for _, file := range files {
+		if file.Status == "succeeded" || strings.TrimSpace(file.File) == "" {
+			continue
+		}
+		if !seen[file.File] {
+			inputs = append(inputs, file.File)
+			seen[file.File] = true
+		}
+	}
+	sort.Strings(inputs)
+	return inputs
+}
+
+func retryRunArgs(global GlobalOptions, data RunData, input string) []string {
+	args := []string{
+		"--output", global.Output,
+		"--state-dir", global.StateDir,
+		"--max-retries", strconv.Itoa(global.MaxRetries),
+	}
+	if global.Agent {
+		args = append(args, "--agent")
+	}
+	if global.Strict {
+		args = append(args, "--strict")
+	}
+	if global.NonInteractive {
+		args = append(args, "--non-interactive")
+	}
+	if global.Yes {
+		args = append(args, "--yes")
+	}
+	if global.TimeoutMS > 0 {
+		args = append(args, "--timeout-ms", strconv.Itoa(global.TimeoutMS))
+	}
+	if data.Prompt != "" {
+		args = append(args, "--prompt", data.Prompt)
+	}
+	if data.Engine != "" {
+		args = append(args, "--engine", data.Engine)
+	}
+	if data.Language != "" {
+		args = append(args, "--language", data.Language)
+	}
+	clipboard := data.Clipboard
+	if global.Agent {
+		clipboard = "never"
+	}
+	if clipboard != "" {
+		args = append(args, "--clipboard", clipboard)
+	}
+	if data.MonoMode != "" {
+		args = append(args, "--mono-mode", data.MonoMode)
+	}
+	if data.SampleRate > 0 {
+		args = append(args, "--sample-rate", strconv.Itoa(data.SampleRate))
+	}
+	if data.Timestamps {
+		args = append(args, "--timestamps")
+	}
+	args = append(args, "--stream-transcript="+strconv.FormatBool(data.StreamTranscript && !global.Agent))
+	if data.ModelName != "" {
+		args = append(args, "--model", data.ModelName)
+	} else if data.ModelRef != "" {
+		args = append(args, "--model", strings.TrimSuffix(strings.TrimPrefix(data.ModelRef, "ggml-"), ".bin"))
+	}
+	if data.HFModelID != "" {
+		args = append(args, "--hf-model-id", data.HFModelID)
+	}
+	if data.FFmpegPath != "" {
+		args = append(args, "--ffmpeg-path", data.FFmpegPath)
+	}
+	if input == "" {
+		input = data.Input
+	}
+	args = append(args, input)
+	return args
+}
+
+func historyDBPath(stateDir string) string {
+	return filepath.Join(stateDir, "scriby.db")
+}
+
+func openHistoryDB(stateDir string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", historyDBPath(stateDir))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := ensureHistorySchema(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func openHistoryCommandDB(global GlobalOptions) (*sql.DB, string, *AppError) {
+	stateDir, err := ensureStateDir(global.StateDir)
+	if err != nil {
+		ae := newError("filesystem", "STATE_DIR_ERROR", err.Error(), false, "Set --state-dir to a writable directory")
+		return nil, "", &ae
+	}
+	db, err := openHistoryDB(stateDir)
+	if err != nil {
+		ae := newError("filesystem", "HISTORY_DB_ERROR", err.Error(), false, "Check the SQLite database path or set --state-dir")
+		return nil, stateDir, &ae
+	}
+	return db, stateDir, nil
+}
+
+func ensureHistorySchema(db *sql.DB) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS runs (
+			run_id TEXT PRIMARY KEY,
+			created_at TEXT NOT NULL,
+			command TEXT NOT NULL,
+			status TEXT NOT NULL,
+			session_id TEXT,
+			input TEXT,
+			engine TEXT,
+			model_ref TEXT,
+			envelope_json TEXT NOT NULL,
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			files_total INTEGER NOT NULL DEFAULT 0,
+			files_succeeded INTEGER NOT NULL DEFAULT 0,
+			files_failed INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE TABLE IF NOT EXISTS transcriptions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+			created_at TEXT NOT NULL,
+			file_path TEXT NOT NULL,
+			transcript_path TEXT,
+			description_path TEXT,
+			status TEXT NOT NULL,
+			transcript_text TEXT,
+			description_text TEXT,
+			error_code TEXT,
+			UNIQUE(run_id, file_path)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_transcriptions_run_id ON transcriptions(run_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_transcriptions_file_path ON transcriptions(file_path)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func saveHistoryRecord(stateDir string, env Envelope) error {
+	runData, ok := env.Data.(RunData)
+	if !ok {
+		return nil
+	}
+	db, err := openHistoryDB(stateDir)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	createdAt := runCreatedAt(env.RunID)
+	envelopeBytes, err := json.Marshal(env)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO runs (
+			run_id, created_at, command, status, session_id, input, engine, model_ref,
+			envelope_json, duration_ms, files_total, files_succeeded, files_failed
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(run_id) DO UPDATE SET
+			created_at=excluded.created_at,
+			command=excluded.command,
+			status=excluded.status,
+			session_id=excluded.session_id,
+			input=excluded.input,
+			engine=excluded.engine,
+			model_ref=excluded.model_ref,
+			envelope_json=excluded.envelope_json,
+			duration_ms=excluded.duration_ms,
+			files_total=excluded.files_total,
+			files_succeeded=excluded.files_succeeded,
+			files_failed=excluded.files_failed`,
+		env.RunID,
+		createdAt,
+		env.Command,
+		env.Status,
+		env.SessionID,
+		runData.Input,
+		runData.Engine,
+		runData.ModelRef,
+		string(envelopeBytes),
+		asInt64(env.Metrics["duration_ms"]),
+		asInt64(env.Metrics["files_total"]),
+		asInt64(env.Metrics["files_succeeded"]),
+		asInt64(env.Metrics["files_failed"]),
+	); err != nil {
+		return err
+	}
+
+	for _, file := range runData.Files {
+		transcriptText := ""
+		if file.Transcript != "" {
+			transcriptText, _ = readOptionalTextFile(file.Transcript)
+		}
+		descriptionText := ""
+		if file.Description != "" {
+			descriptionText, _ = readOptionalTextFile(file.Description)
+		}
+		errorCode := ""
+		if file.Error != nil {
+			errorCode = file.Error.Code
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO transcriptions (
+				run_id, created_at, file_path, transcript_path, description_path, status,
+				transcript_text, description_text, error_code
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(run_id, file_path) DO UPDATE SET
+				created_at=excluded.created_at,
+				transcript_path=excluded.transcript_path,
+				description_path=excluded.description_path,
+				status=excluded.status,
+				transcript_text=excluded.transcript_text,
+				description_text=excluded.description_text,
+				error_code=excluded.error_code`,
+			env.RunID,
+			createdAt,
+			file.File,
+			file.Transcript,
+			file.Description,
+			file.Status,
+			transcriptText,
+			descriptionText,
+			errorCode,
+		); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func listHistoryRuns(db *sql.DB, limit int, status string, since *time.Time) ([]HistoryRun, error) {
+	query := `SELECT run_id, created_at, status, COALESCE(input, ''), COALESCE(engine, ''),
+		COALESCE(model_ref, ''), files_total, files_succeeded, files_failed, duration_ms
+		FROM runs`
+	args := []any{}
+	clauses := []string{}
+	if status != "" {
+		clauses = append(clauses, `status = ?`)
+		args = append(args, status)
+	}
+	if since != nil {
+		clauses = append(clauses, `created_at >= ?`)
+		args = append(args, since.UTC().Format(time.RFC3339))
+	}
+	if len(clauses) > 0 {
+		query += ` WHERE ` + strings.Join(clauses, ` AND `)
+	}
+	query += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanHistoryRuns(rows)
+}
+
+func latestHistoryRunID(db *sql.DB) (string, error) {
+	var runID string
+	err := db.QueryRow(`SELECT run_id FROM runs ORDER BY created_at DESC LIMIT 1`).Scan(&runID)
+	return runID, err
+}
+
+func getHistoryRun(db *sql.DB, runID string, includeTranscript bool) (HistoryRun, []HistoryTranscription, string, error) {
+	row := db.QueryRow(`SELECT run_id, created_at, status, COALESCE(input, ''), COALESCE(engine, ''),
+		COALESCE(model_ref, ''), files_total, files_succeeded, files_failed, duration_ms, envelope_json
+		FROM runs WHERE run_id = ?`, runID)
+	var run HistoryRun
+	var envelopeJSON string
+	if err := row.Scan(&run.RunID, &run.CreatedAt, &run.Status, &run.Input, &run.Engine, &run.ModelRef, &run.FilesTotal, &run.FilesSucceeded, &run.FilesFailed, &run.DurationMS, &envelopeJSON); err != nil {
+		return HistoryRun{}, nil, "", err
+	}
+
+	selectText := "'' AS transcript_text, '' AS description_text"
+	if includeTranscript {
+		selectText = "COALESCE(transcript_text, '') AS transcript_text, COALESCE(description_text, '') AS description_text"
+	}
+	rows, err := db.Query(`SELECT run_id, created_at, file_path, COALESCE(transcript_path, ''),
+		COALESCE(description_path, ''), status, `+selectText+`, COALESCE(error_code, '')
+		FROM transcriptions WHERE run_id = ? ORDER BY id ASC`, runID)
+	if err != nil {
+		return HistoryRun{}, nil, "", err
+	}
+	defer rows.Close()
+	files, err := scanHistoryTranscriptions(rows)
+	if err != nil {
+		return HistoryRun{}, nil, "", err
+	}
+	return run, files, envelopeJSON, nil
+}
+
+func searchHistory(db *sql.DB, query string, limit int, since *time.Time) ([]HistoryTranscription, error) {
+	like := "%" + query + "%"
+	where := `WHERE (transcript_text LIKE ? OR description_text LIKE ? OR file_path LIKE ?)`
+	args := []any{like, like, like}
+	if since != nil {
+		where += ` AND created_at >= ?`
+		args = append(args, since.UTC().Format(time.RFC3339))
+	}
+	args = append(args, limit)
+	rows, err := db.Query(`SELECT run_id, created_at, file_path, COALESCE(transcript_path, ''),
+		COALESCE(description_path, ''), status, COALESCE(transcript_text, ''), COALESCE(description_text, ''),
+		COALESCE(error_code, '')
+		FROM transcriptions
+		`+where+`
+		ORDER BY created_at DESC
+		LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanHistoryTranscriptions(rows)
+}
+
+func historySchema(db *sql.DB) (map[string]any, error) {
+	tables := []string{"runs", "transcriptions"}
+	out := map[string]any{}
+	for _, table := range tables {
+		rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+		if err != nil {
+			return nil, err
+		}
+		cols := []map[string]any{}
+		for rows.Next() {
+			var cid int
+			var name string
+			var typ string
+			var notNull int
+			var defaultValue any
+			var pk int
+			if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			cols = append(cols, map[string]any{
+				"name":     name,
+				"type":     typ,
+				"not_null": notNull == 1,
+				"primary":  pk > 0,
+			})
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+		out[table] = cols
+	}
+	return out, nil
+}
+
+func transcriptsOnly(files []HistoryTranscription) []map[string]string {
+	out := []map[string]string{}
+	for _, file := range files {
+		if strings.TrimSpace(file.Transcript) == "" {
+			continue
+		}
+		out = append(out, map[string]string{
+			"file":       file.File,
+			"transcript": file.Transcript,
+		})
+	}
+	return out
+}
+
+func exportHistoryMarkdown(run HistoryRun, files []HistoryTranscription) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Scriby Run %s\n\n", run.RunID)
+	fmt.Fprintf(&b, "- status: %s\n", run.Status)
+	if run.Input != "" {
+		fmt.Fprintf(&b, "- input: %s\n", run.Input)
+	}
+	if run.Engine != "" {
+		fmt.Fprintf(&b, "- engine: %s\n", run.Engine)
+	}
+	if run.CreatedAt != "" {
+		fmt.Fprintf(&b, "- created_at: %s\n", run.CreatedAt)
+	}
+	for _, file := range files {
+		fmt.Fprintf(&b, "\n## %s\n\n", file.File)
+		if file.Status != "" {
+			fmt.Fprintf(&b, "- status: %s\n", file.Status)
+		}
+		if file.TranscriptPath != "" {
+			fmt.Fprintf(&b, "- transcript_path: %s\n", file.TranscriptPath)
+		}
+		if strings.TrimSpace(file.Transcript) != "" {
+			fmt.Fprintf(&b, "\n### Transcript\n\n%s\n", strings.TrimSpace(file.Transcript))
+		}
+		if strings.TrimSpace(file.Description) != "" {
+			fmt.Fprintf(&b, "\n### Description\n\n%s\n", strings.TrimSpace(file.Description))
+		}
+	}
+	return b.String()
+}
+
+func parseSince(raw string, now time.Time) (*time.Time, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil, nil
+	}
+	if strings.HasSuffix(s, "d") {
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("invalid day duration: %s", raw)
+		}
+		t := now.Add(-time.Duration(n) * 24 * time.Hour).UTC()
+		return &t, nil
+	}
+	if d, err := time.ParseDuration(s); err == nil && d > 0 {
+		t := now.Add(-d).UTC()
+		return &t, nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		utc := t.UTC()
+		return &utc, nil
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		utc := t.UTC()
+		return &utc, nil
+	}
+	return nil, fmt.Errorf("invalid since value: %s", raw)
+}
+
+func scanHistoryRuns(rows *sql.Rows) ([]HistoryRun, error) {
+	runs := []HistoryRun{}
+	for rows.Next() {
+		var run HistoryRun
+		if err := rows.Scan(&run.RunID, &run.CreatedAt, &run.Status, &run.Input, &run.Engine, &run.ModelRef, &run.FilesTotal, &run.FilesSucceeded, &run.FilesFailed, &run.DurationMS); err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+func scanHistoryTranscriptions(rows *sql.Rows) ([]HistoryTranscription, error) {
+	files := []HistoryTranscription{}
+	for rows.Next() {
+		var file HistoryTranscription
+		if err := rows.Scan(&file.RunID, &file.CreatedAt, &file.File, &file.TranscriptPath, &file.DescriptionPath, &file.Status, &file.Transcript, &file.Description, &file.ErrorCode); err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+	return files, rows.Err()
+}
+
+func queryHistorySQL(db *sql.DB, query string) ([]map[string]any, error) {
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	results := []map[string]any{}
+	for rows.Next() {
+		values := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range values {
+			ptrs[i] = &values[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		row := map[string]any{}
+		for i, col := range cols {
+			switch v := values[i].(type) {
+			case []byte:
+				row[col] = string(v)
+			default:
+				row[col] = v
+			}
+		}
+		results = append(results, row)
+	}
+	return results, rows.Err()
+}
+
+func isReadOnlyHistorySQL(query string) bool {
+	q := strings.TrimSpace(query)
+	q = strings.TrimSuffix(q, ";")
+	if strings.Contains(q, ";") {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(q))
+	return strings.HasPrefix(lower, "select ") || strings.HasPrefix(lower, "with ") || strings.HasPrefix(lower, "pragma ")
+}
+
+func readOptionalTextFile(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func runCreatedAt(runID string) string {
+	if len(runID) >= len("20060102-150405") {
+		if t, err := time.Parse("20060102-150405", runID[:15]); err == nil {
+			return t.UTC().Format(time.RFC3339)
+		}
+	}
+	return time.Now().UTC().Format(time.RFC3339)
+}
+
 func printEnvelope(env Envelope, mode string) error {
 	switch mode {
 	case "text":
@@ -2474,6 +3791,9 @@ func guessOutput(args []string) string {
 func outputPreference(args []string) (string, string) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if a == "--agent" || a == "--agent=true" {
+			return "json", "flag"
+		}
 		if strings.HasPrefix(a, "--output=") {
 			return strings.TrimSpace(strings.TrimPrefix(a, "--output=")), "flag"
 		}
@@ -2546,7 +3866,7 @@ func splitRootArgs(args []string) ([]string, []string, bool, error) {
 			help = true
 			leading = append(leading, arg)
 			i++
-		case arg == "--strict" || arg == "--non-interactive" || arg == "--yes":
+		case arg == "--agent" || arg == "--strict" || arg == "--non-interactive" || arg == "--yes":
 			leading = append(leading, arg)
 			i++
 		case strings.HasPrefix(arg, "--output="),
@@ -2720,6 +4040,19 @@ func asInt(v any) int {
 	}
 }
 
+func asInt64(v any) int64 {
+	switch t := v.(type) {
+	case int:
+		return int64(t)
+	case int64:
+		return t
+	case float64:
+		return int64(t)
+	default:
+		return 0
+	}
+}
+
 func copyFile(src string, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -2789,6 +4122,7 @@ Run Flags:
 
 Global Flags:
   --output json|jsonl|text  (jsonl streams progress/events; json/text print progress to stderr)
+  --agent                   JSON output, non-interactive prompts, clipboard disabled for run
   --strict
   --non-interactive         Disable interactive prompts (default: false)
   --yes
@@ -2841,6 +4175,23 @@ Exit Codes:
 `
 }
 
+func retryHelp() string {
+	return `Usage: scriby retry [flags] <run_id>
+
+Purpose:
+  Retry a saved transcription run. By default retries the original input; use --failed-only
+  to retry only failed files from the saved run.
+
+Flags:
+  --failed-only            Retry only failed files
+  --agent                  JSON output, non-interactive prompts, clipboard disabled
+  --state-dir <path>       State directory containing saved run history
+
+Exit Codes:
+  0 success, 2 input, 3 dependency/setup, 4 runtime failure, 5 partial, 10 internal
+`
+}
+
 func modelsHelp() string {
 	return `Usage: scriby models <pull|list|prune> [flags]
 
@@ -2848,6 +4199,37 @@ Subcommands:
   pull   Download/install a whisper model into state dir
   list   List known whisper model names and installed model files
   prune  Remove one whisper model (--name) or all models (requires --yes)
+
+Exit Codes:
+  0 success, 2 input, 3 dependency/setup, 4 runtime failure, 10 internal
+`
+}
+
+func historyHelp() string {
+	return `Usage: scriby history <path|list|latest|show|search|export|schema|sql> [flags]
+
+Purpose:
+  Explore durable local run/transcription history stored in ~/.scriby/scriby.db.
+
+Subcommands:
+  path                 Print state directory and SQLite database path
+  list                 List recent transcription runs (--limit, --status, --since)
+  latest               Show the latest run, optionally --transcript-only
+  show <run_id>        Show one run, files, transcript text, and saved envelope
+  search <query>       Search transcript, description, and file path text (--since)
+  export <run_id>      Export one run as markdown or json
+  schema               Print SQLite table/column schema
+  sql <statement>      Run a read-only SELECT/WITH/PRAGMA query
+
+Examples:
+  scriby history path
+  scriby history list --limit 10
+  scriby history latest --transcript-only
+  scriby history show 20260224-abc123
+  scriby history search "customer discovery" --since 7d
+  scriby history export --latest --format markdown
+  scriby history schema
+  scriby history sql "select run_id, status, input from runs order by created_at desc limit 5"
 
 Exit Codes:
   0 success, 2 input, 3 dependency/setup, 4 runtime failure, 10 internal

@@ -42,6 +42,14 @@ func TestHelpShortFlagReturnsSuccessEnvelope(t *testing.T) {
 			want: replayHelp(),
 		},
 		{
+			name:    "retry",
+			command: "retry",
+			run: func() (Envelope, int) {
+				return handleRetry([]string{"-h"})
+			},
+			want: retryHelp(),
+		},
+		{
 			name:    "models pull",
 			command: "models.pull",
 			run: func() (Envelope, int) {
@@ -64,6 +72,14 @@ func TestHelpShortFlagReturnsSuccessEnvelope(t *testing.T) {
 				return handleModels([]string{"prune", "-h"})
 			},
 			want: modelsHelp(),
+		},
+		{
+			name:    "history",
+			command: "history",
+			run: func() (Envelope, int) {
+				return handleHistory([]string{"-h"})
+			},
+			want: historyHelp(),
 		},
 	}
 

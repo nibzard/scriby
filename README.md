@@ -54,15 +54,25 @@ scriby run \
 
 What happens on first run:
 
-- Scriby installs `whisper-cli` to `~/Library/Caches/scriby/runtime` on macOS.
-- Scriby downloads the selected model to `~/Library/Caches/scriby/models`.
+- Scriby creates durable local state in `~/.scriby`.
+- Scriby installs `whisper-cli` to `~/.scriby/runtime`.
+- Scriby downloads the selected model to `~/.scriby/models`.
 - Transcript is written next to your input file as `<name>.md`.
+- Run metadata plus transcript/description text are indexed in `~/.scriby/scriby.db`.
 
 Example:
 
 ```bash
 scriby run --model medium --language en --stream-transcript=false ./meeting.wav
 ```
+
+Agent-friendly run:
+
+```bash
+scriby run --agent ./meeting.wav
+```
+
+`--agent` is a shortcut for machine use: JSON output, non-interactive prompts, `--yes`, no clipboard prompt during `run`, and compact transcript handling.
 
 ## Cohere Transcribe engine
 
@@ -108,6 +118,40 @@ Notes:
 - First run may take a while because uv installs mlx-audio and downloads model weights from Hugging Face.
 
 Supported input formats include `.mp4`, `.m4a`, `.mp3`, `.mov`, and `.wav`.
+
+## History database
+
+Scriby keeps a local SQLite history database at:
+
+```bash
+~/.scriby/scriby.db
+```
+
+The database stores run metadata and the transcript/description text captured during each run, while still leaving Markdown files next to the original media.
+
+Useful commands:
+
+```bash
+scriby history path
+scriby history list --limit 10
+scriby history list --since 7d
+scriby history latest --transcript-only
+scriby history show <run_id>
+scriby history search "customer discovery"
+scriby history search "customer discovery" --since 7d
+scriby history export --latest --format markdown
+scriby history schema
+scriby history sql "select run_id, status, input from runs order by created_at desc limit 5"
+```
+
+Override the location with `--state-dir <path>` or `SCRIBY_STATE_DIR`.
+
+Recovery:
+
+```bash
+scriby retry <run_id>
+scriby retry <run_id> --failed-only --agent
+```
 
 Clipboard prompting is enabled by default for interactive runs. Use these overrides when needed:
 

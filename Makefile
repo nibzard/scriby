@@ -3,13 +3,16 @@ VERSION ?= dev
 DIST_DIR ?= dist
 GOOS_ARCHES ?= darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64
 
-.PHONY: build test clean dist runtime-assets
+.PHONY: build test agent-smoke clean dist runtime-assets
 
 build:
 	go build -o $(BINARY) .
 
 test:
 	go test ./...
+
+agent-smoke: build
+	SCRIBY_BIN="$(CURDIR)/$(BINARY)" ./scripts/agent-smoke.sh
 
 clean:
 	rm -rf $(DIST_DIR)
