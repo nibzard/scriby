@@ -11,7 +11,7 @@ Releases:
 Quick install (macOS/Linux):
 
 ```bash
-VERSION="v2.1.3"
+VERSION="v2.1.4"
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -28,7 +28,7 @@ scriby --help
 macOS Apple Silicon (`arm64`) direct example:
 
 ```bash
-curl -L -o /tmp/scriby.tar.gz "https://github.com/nibzard/scriby/releases/download/v2.1.3/scriby-v2.1.3-darwin-arm64.tar.gz"
+curl -L -o /tmp/scriby.tar.gz "https://github.com/nibzard/scriby/releases/download/v2.1.4/scriby-v2.1.4-darwin-arm64.tar.gz"
 tar -xzf /tmp/scriby.tar.gz -C /tmp
 sudo install /tmp/scriby /usr/local/bin/scriby
 scriby --help
@@ -187,7 +187,7 @@ Scriby release binaries:
 
 ```bash
 make test
-make dist VERSION=v2.1.3
+make dist VERSION=v2.1.4
 ```
 
 This generates cross-platform archives under `dist/scriby`.
@@ -195,7 +195,7 @@ This generates cross-platform archives under `dist/scriby`.
 Whisper runtime assets + manifest (published in `nibzard/scriby`):
 
 ```bash
-make runtime-assets VERSION=v2.1.3
+make runtime-assets VERSION=v2.1.4
 ```
 
 This packages `runtime/bin/<os>_<arch>/whisper-cli(.exe)` into `dist/runtime` and generates:
@@ -212,7 +212,7 @@ GitHub Actions workflows:
 
 By default, Scriby resolves runtime assets from:
 
-`https://github.com/nibzard/scriby/releases/download/v2.1.3/runtime-manifest.json`
+`https://github.com/nibzard/scriby/releases/download/v2.1.4/runtime-manifest.json`
 
 Override when needed:
 
