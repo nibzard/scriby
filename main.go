@@ -692,6 +692,14 @@ func handleRun(args []string) (Envelope, int) {
 				fmt.Sprintf("Failed file %d/%d: %s", i+1, len(files), media),
 				map[string]any{"file": media, "index": i + 1, "total": len(files), "error_code": perr.Code},
 			)
+		} else if fr.Status == "partial" {
+			successes++
+			failures++
+			progress.Step(
+				"file.partial",
+				fmt.Sprintf("Partially completed file %d/%d: %s", i+1, len(files), media),
+				map[string]any{"file": media, "index": i + 1, "total": len(files)},
+			)
 		} else {
 			successes++
 			progress.Step(
@@ -794,11 +802,19 @@ func handleValidate(args []string) (Envelope, int) {
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitInput
 	}
+	inputFiles, lerr := listInputFiles(cfg.Input)
+	if lerr != nil {
+		env.Status = "failed"
+		env.Errors = []AppError{*lerr}
+		finishEnvelope(&env, started, 0, 0, 0)
+		return env, exitInput
+	}
 
 	checks := map[string]any{}
 	checks["state_dir"] = stateDir
 	checks["engine"] = normalizeEngine(cfg.Engine)
 	checks["input_exists"] = fileExists(cfg.Input) || dirExists(cfg.Input)
+	checks["supported_media_files"] = len(inputFiles)
 	checks["prompt_exists"] = cfg.Prompt == "" || fileExists(cfg.Prompt)
 	checks["sample_rate"] = cfg.SampleRate
 	checks["mono_mode"] = cfg.MonoMode
@@ -1044,6 +1060,7 @@ func handleReplay(args []string) (Envelope, int) {
 func handleRetry(args []string) (Envelope, int) {
 	started := time.Now()
 	args = hoistGlobalFlags(args)
+	args = hoistRetryFlags(args)
 	env := newEnvelope("retry")
 	global := defaultGlobalOptions()
 	failedOnly := false
@@ -1118,9 +1135,13 @@ func handleRetry(args []string) (Envelope, int) {
 		runArgs := retryRunArgs(global, stored.Data, input)
 		retryEnv, code := handleRun(runArgs)
 		retried = append(retried, retryEnv)
-		if code == exitOK {
+		switch code {
+		case exitOK:
 			successes++
-		} else {
+		case exitPartial:
+			successes++
+			failures++
+		default:
 			failures++
 		}
 	}
@@ -2035,14 +2056,26 @@ func processMediaFile(
 		if !haveLLM {
 			ae := newError("dependency", "LLM_NOT_FOUND", "llm CLI not found", false, "Install llm or set --llm-path")
 			fr.Error = &ae
-			return fr, warnings, &ae
+			fr.Status = "partial"
+			warnings = append(warnings, Warning{
+				Code:    "DESCRIPTION_FAILED",
+				Message: fmt.Sprintf("Transcript succeeded for %s, but description generation was skipped because llm was not found", absMedia),
+			})
+			progress.Step("description.failed", fmt.Sprintf("Description skipped for %s; transcript was kept", filepath.Base(absMedia)), map[string]any{"file": absMedia, "error_code": ae.Code, "transcript": transcript})
+			return fr, warnings, nil
 		}
 		desc := paths.DescriptionTarget
 		progress.Step("description.start", fmt.Sprintf("Generating description: %s", filepath.Base(desc)), map[string]any{"file": absMedia, "prompt": promptPath})
 		dErr := generateDescription(ctx, llmPath, transcript, promptPath, desc)
 		if dErr != nil {
 			fr.Error = dErr
-			return fr, warnings, dErr
+			fr.Status = "partial"
+			warnings = append(warnings, Warning{
+				Code:    "DESCRIPTION_FAILED",
+				Message: fmt.Sprintf("Transcript succeeded for %s, but description generation failed: %s", absMedia, dErr.Message),
+			})
+			progress.Step("description.failed", fmt.Sprintf("Description failed for %s; transcript was kept", filepath.Base(absMedia)), map[string]any{"file": absMedia, "error_code": dErr.Code, "transcript": transcript})
+			return fr, warnings, nil
 		}
 		fr.Description = desc
 		fr.ArtifactDescription = paths.ArtifactDescription
@@ -2060,7 +2093,9 @@ func processMediaFile(
 		warnings = append(warnings, Warning{Code: "PROMPT_NOT_SET", Message: fmt.Sprintf("No prompt found for %s; description generation skipped", absMedia)})
 	}
 
-	fr.Status = "succeeded"
+	if fr.Status == "" || fr.Status == "failed" {
+		fr.Status = "succeeded"
+	}
 	return fr, warnings, nil
 }
 
@@ -2392,6 +2427,7 @@ func generateDescription(ctx context.Context, llmPath string, transcriptPath str
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		_ = os.Remove(outputPath)
 		return ptrError(newError("runtime", "LLM_DESCRIPTION_FAILED", err.Error(), true, trimHint(stderr.String())))
 	}
 	return nil
@@ -3764,6 +3800,28 @@ func hoistGlobalFlags(args []string) []string {
 		if isGlobalValueFlag(arg) && i+1 < len(args) {
 			front = append(front, arg, args[i+1])
 			i++
+			continue
+		}
+		rest = append(rest, arg)
+	}
+	if len(front) == 0 {
+		return args
+	}
+	out := make([]string, 0, len(args))
+	out = append(out, front...)
+	out = append(out, rest...)
+	return out
+}
+
+func hoistRetryFlags(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	front := []string{}
+	rest := []string{}
+	for _, arg := range args {
+		if arg == "--failed-only" || arg == "--failed-only=true" {
+			front = append(front, arg)
 			continue
 		}
 		rest = append(rest, arg)

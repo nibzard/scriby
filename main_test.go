@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -208,6 +211,46 @@ func TestValidateRunInputsRejectsUnknownEngine(t *testing.T) {
 	_, err := validateRunInputs(cfg)
 	if err == nil || err.Code != "INVALID_ENGINE" {
 		t.Fatalf("expected INVALID_ENGINE, got %#v", err)
+	}
+}
+
+func TestHandleValidateRejectsUnsupportedFileType(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "notes.md")
+	if err := os.WriteFile(path, []byte("not media"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	env, code := handleValidate([]string{"--state-dir", t.TempDir(), path})
+	if code != exitInput {
+		t.Fatalf("validate code = %d, want %d; env = %#v", code, exitInput, env)
+	}
+	if env.Status != "failed" || len(env.Errors) != 1 || env.Errors[0].Code != "UNSUPPORTED_FILE_TYPE" {
+		t.Fatalf("validate env = %#v", env)
+	}
+}
+
+func TestGenerateDescriptionRemovesOutputOnFailure(t *testing.T) {
+	falsePath, err := exec.LookPath("false")
+	if err != nil {
+		t.Skip("false command unavailable")
+	}
+	dir := t.TempDir()
+	transcript := filepath.Join(dir, "transcript.md")
+	prompt := filepath.Join(dir, "prompt.md")
+	out := filepath.Join(dir, "description.md")
+	if err := os.WriteFile(transcript, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+	if err := os.WriteFile(prompt, []byte("summarize"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	appErr := generateDescription(context.Background(), falsePath, transcript, prompt, out)
+	if appErr == nil || appErr.Code != "LLM_DESCRIPTION_FAILED" {
+		t.Fatalf("generateDescription error = %#v", appErr)
+	}
+	if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed description output should be removed, stat err = %v", err)
 	}
 }
 
@@ -917,6 +960,14 @@ func TestHoistGlobalFlagsAllowsTrailingAgent(t *testing.T) {
 	want := []string{"--agent", "developer tools"}
 	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
 		t.Fatalf("hoistGlobalFlags = %q, want %q", got, want)
+	}
+}
+
+func TestHoistRetryFlagsAllowsTrailingFailedOnly(t *testing.T) {
+	got := hoistRetryFlags([]string{"run-123", "--failed-only"})
+	want := []string{"--failed-only", "run-123"}
+	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
+		t.Fatalf("hoistRetryFlags = %q, want %q", got, want)
 	}
 }
 
