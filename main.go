@@ -2444,6 +2444,16 @@ func ensureModel(ctx context.Context, stateDir string, modelName string, modelUR
 	}
 
 	tmp := target + ".tmp"
+	progress.Step(
+		"model.download.notice",
+		modelDownloadNotice(modelFilename(modelName), target),
+		map[string]any{
+			"model":        modelFilename(modelName),
+			"path":         target,
+			"size_hint":    modelSizeHint(modelName),
+			"cached_after": true,
+		},
+	)
 	progress.Step("model.download", fmt.Sprintf("Downloading model %s", modelFilename(modelName)), map[string]any{"model": modelFilename(modelName), "url": url})
 	if err := downloadFile(ctx, url, tmp, maxRetries, progress, modelFilename(modelName)); err != nil {
 		ae := newError("network", "MODEL_DOWNLOAD_FAILED", err.Error(), true, "Check network, model URL, or use --model-url")
@@ -2459,6 +2469,31 @@ func ensureModel(ctx context.Context, stateDir string, modelName string, modelUR
 	}
 	progress.Step("model.ready", fmt.Sprintf("Model ready: %s", target), map[string]any{"model": modelFilename(modelName), "path": target, "source": "download"})
 	return target, nil
+}
+
+func modelDownloadNotice(model string, target string) string {
+	sizeHint := modelSizeHint(model)
+	if sizeHint != "" {
+		return fmt.Sprintf("First-time model download for %s (%s). This can take several minutes; Scriby caches it at %s for future runs.", model, sizeHint, target)
+	}
+	return fmt.Sprintf("First-time model download for %s. This can take several minutes; Scriby caches it at %s for future runs.", model, target)
+}
+
+func modelSizeHint(model string) string {
+	switch strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(model), "ggml-"), ".bin") {
+	case "tiny":
+		return "about 75 MiB"
+	case "base":
+		return "about 140 MiB"
+	case "small":
+		return "about 465 MiB"
+	case "medium":
+		return "about 1.4 GiB"
+	case "large-v3":
+		return "about 3 GiB"
+	default:
+		return ""
+	}
 }
 
 func downloadAndInstallWhisper(ctx context.Context, url string, expectedSHA256 string, destBinaryPath string, maxRetries int, progress *ProgressReporter) error {

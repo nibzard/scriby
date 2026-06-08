@@ -36,6 +36,18 @@ func TestModelFilenameNormalization(t *testing.T) {
 	}
 }
 
+func TestModelDownloadNoticeExplainsFirstRunCost(t *testing.T) {
+	notice := modelDownloadNotice("ggml-medium.bin", "/tmp/scriby/models/ggml-medium.bin")
+	for _, want := range []string{"First-time model download", "ggml-medium.bin", "about 1.4 GiB", "several minutes", "caches"} {
+		if !strings.Contains(notice, want) {
+			t.Fatalf("modelDownloadNotice() = %q, want substring %q", notice, want)
+		}
+	}
+	if got := modelSizeHint("medium"); got != "about 1.4 GiB" {
+		t.Fatalf("modelSizeHint(medium) = %q", got)
+	}
+}
+
 func TestNormalizeArch(t *testing.T) {
 	if got := normalizeArch("x86_64"); got != "amd64" {
 		t.Fatalf("normalizeArch(x86_64) = %q, want amd64", got)
