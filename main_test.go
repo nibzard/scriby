@@ -469,6 +469,23 @@ func TestClipboardTranscriptPath(t *testing.T) {
 	}
 }
 
+func TestClipboardAskSkipsInJSONLWhenNonInteractive(t *testing.T) {
+	transcript := filepath.Join(t.TempDir(), "one.md")
+	if err := os.WriteFile(transcript, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	warnings := maybeHandleClipboard(
+		GlobalOptions{Output: "jsonl", NonInteractive: true},
+		RunConfig{Clipboard: "ask"},
+		[]FileResult{{File: "one.wav", Transcript: transcript, Status: "succeeded"}},
+		newProgressReporter("jsonl", "run", "run-1"),
+	)
+	if len(warnings) != 1 || warnings[0].Code != "CLIPBOARD_PROMPT_SKIPPED" {
+		t.Fatalf("warnings = %#v, want CLIPBOARD_PROMPT_SKIPPED", warnings)
+	}
+}
+
 func TestHistoryRecordStoresTranscriptAndSearches(t *testing.T) {
 	stateDir := t.TempDir()
 	mediaDir := t.TempDir()
