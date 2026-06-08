@@ -74,6 +74,22 @@ var cohereSupportedLanguages = map[string]string{
 	"zh-cn": "zh",
 }
 
+var whisperSupportedLanguages = map[string]struct{}{
+	"auto": {}, "af": {}, "am": {}, "ar": {}, "as": {}, "az": {}, "ba": {}, "be": {},
+	"bg": {}, "bn": {}, "bo": {}, "br": {}, "bs": {}, "ca": {}, "cs": {}, "cy": {},
+	"da": {}, "de": {}, "el": {}, "en": {}, "es": {}, "et": {}, "eu": {}, "fa": {},
+	"fi": {}, "fo": {}, "fr": {}, "gl": {}, "gu": {}, "ha": {}, "haw": {}, "he": {},
+	"hi": {}, "hr": {}, "ht": {}, "hu": {}, "hy": {}, "id": {}, "is": {}, "it": {},
+	"ja": {}, "jw": {}, "ka": {}, "kk": {}, "km": {}, "kn": {}, "ko": {}, "la": {},
+	"lb": {}, "ln": {}, "lo": {}, "lt": {}, "lv": {}, "mg": {}, "mi": {}, "mk": {},
+	"ml": {}, "mn": {}, "mr": {}, "ms": {}, "mt": {}, "my": {}, "ne": {}, "nl": {},
+	"nn": {}, "no": {}, "oc": {}, "pa": {}, "pl": {}, "ps": {}, "pt": {}, "ro": {},
+	"ru": {}, "sa": {}, "sd": {}, "si": {}, "sk": {}, "sl": {}, "sn": {}, "so": {},
+	"sq": {}, "sr": {}, "su": {}, "sv": {}, "sw": {}, "ta": {}, "te": {}, "tg": {},
+	"th": {}, "tk": {}, "tl": {}, "tr": {}, "tt": {}, "uk": {}, "ur": {}, "uz": {},
+	"vi": {}, "yi": {}, "yo": {}, "zh": {}, "yue": {},
+}
+
 type AppError struct {
 	Class     string `json:"class"`
 	Code      string `json:"code"`
@@ -111,6 +127,10 @@ type GlobalOptions struct {
 	SessionPolicy  string
 	SessionID      string
 	StateDir       string
+}
+
+type validationOptions struct {
+	Strict bool
 }
 
 type RunConfig struct {
@@ -556,7 +576,7 @@ func handleRun(args []string) (Envelope, int) {
 		}
 	}
 
-	validationWarnings, validationErr := validateRunInputs(cfg)
+	validationWarnings, validationErr := validateRunInputs(cfg, validationOptions{Strict: global.Strict})
 	env.Warnings = append(env.Warnings, validationWarnings...)
 	if validationErr != nil {
 		env.Status = "failed"
@@ -675,6 +695,7 @@ func handleRun(args []string) (Envelope, int) {
 
 	var successes int64
 	var failures int64
+	var partials int64
 
 	for i, media := range files {
 		progress.Step(
@@ -694,7 +715,7 @@ func handleRun(args []string) (Envelope, int) {
 			)
 		} else if fr.Status == "partial" {
 			successes++
-			failures++
+			partials++
 			progress.Step(
 				"file.partial",
 				fmt.Sprintf("Partially completed file %d/%d: %s", i+1, len(files), media),
@@ -712,15 +733,12 @@ func handleRun(args []string) (Envelope, int) {
 
 	env.Data = runData
 	env.Warnings = append(env.Warnings, maybeHandleClipboard(global, cfg, runData.Files, progress)...)
-	if failures == 0 {
-		env.Status = "succeeded"
-	} else if successes > 0 {
-		env.Status = "partial"
-	} else {
-		env.Status = "failed"
-	}
+	env.Status = aggregateRunStatus(successes, partials, failures)
 
 	finishEnvelope(&env, started, int64(len(files)), successes, failures)
+	if partials > 0 {
+		env.Metrics["files_partial"] = partials
+	}
 	if global.IdempotencyKey != "" {
 		_ = saveIdempotencyRecord(stateDir, "run", global.IdempotencyKey, env)
 	}
@@ -728,10 +746,20 @@ func handleRun(args []string) (Envelope, int) {
 	_ = saveHistoryRecord(stateDir, env)
 	progress.Step(
 		"run.done",
-		fmt.Sprintf("Run finished with status %s (%d succeeded, %d failed)", env.Status, successes, failures),
-		map[string]any{"status": env.Status, "files_succeeded": successes, "files_failed": failures},
+		fmt.Sprintf("Run finished with status %s (%d succeeded, %d partial, %d failed)", env.Status, successes, partials, failures),
+		map[string]any{"status": env.Status, "files_succeeded": successes, "files_partial": partials, "files_failed": failures},
 	)
 	return env, exitFromStatus(env.Status)
+}
+
+func aggregateRunStatus(successes int64, partials int64, failures int64) string {
+	if failures == 0 && partials == 0 {
+		return "succeeded"
+	}
+	if successes > 0 || partials > 0 {
+		return "partial"
+	}
+	return "failed"
 }
 
 func handleValidate(args []string) (Envelope, int) {
@@ -794,7 +822,7 @@ func handleValidate(args []string) (Envelope, int) {
 		return env, exitDependency
 	}
 
-	warnings, verr := validateRunInputs(cfg)
+	warnings, verr := validateRunInputs(cfg, validationOptions{Strict: global.Strict})
 	env.Warnings = append(env.Warnings, warnings...)
 	if verr != nil {
 		env.Status = "failed"
@@ -815,7 +843,7 @@ func handleValidate(args []string) (Envelope, int) {
 	checks["engine"] = normalizeEngine(cfg.Engine)
 	checks["input_exists"] = fileExists(cfg.Input) || dirExists(cfg.Input)
 	checks["supported_media_files"] = len(inputFiles)
-	checks["prompt_exists"] = cfg.Prompt == "" || fileExists(cfg.Prompt)
+	checks["prompt_exists"] = cfg.Prompt != "" && fileExists(cfg.Prompt)
 	checks["sample_rate"] = cfg.SampleRate
 	checks["mono_mode"] = cfg.MonoMode
 
@@ -866,6 +894,10 @@ func handleValidate(args []string) (Envelope, int) {
 			if ok, _ := checks["uv"].(bool); !ok {
 				env.Status = "failed"
 				env.Errors = append(env.Errors, newError("dependency", "UV_NOT_FOUND", "uv not found for cohere engine", false, "Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"))
+			}
+			if ok, _ := checks["hf_token_present"].(bool); !ok {
+				env.Status = "failed"
+				env.Errors = append(env.Errors, newError("dependency", "HF_TOKEN_NOT_SET", "HF_TOKEN is required for strict Cohere validation", false, "Set HF_TOKEN after accepting access to the Cohere model on Hugging Face"))
 			}
 		}
 	}
@@ -2147,7 +2179,7 @@ func convertToTempWAV(ctx context.Context, ffmpegPath, input string, sampleRate 
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		_ = os.Remove(tmpPath)
-		ae := newError("runtime", "FFMPEG_CONVERT_FAILED", err.Error(), true, trimHint(stderr.String()))
+		ae := newError("runtime", "FFMPEG_CONVERT_FAILED", err.Error(), true, ffmpegFailureHint(stderr.String()))
 		return "", warn, &ae
 	}
 	return tmpPath, warn, nil
@@ -2195,7 +2227,7 @@ type artifactPaths struct {
 }
 
 func (p artifactPaths) ShouldCopyLatest() bool {
-	return p.Mode == "both"
+	return p.Mode == "both" && p.LatestTranscript != ""
 }
 
 func runArtifactPaths(stateDir string, runID string, absMedia string, outputDir string, mode string) (artifactPaths, error) {
@@ -2217,7 +2249,11 @@ func runArtifactPaths(stateDir string, runID string, absMedia string, outputDir 
 	latestTranscript := filepath.Join(latestDir, stem+".md")
 	latestDescription := filepath.Join(latestDir, stem+"_description.md")
 
-	runDir := filepath.Join(stateDir, "runs", runID)
+	runRoot := filepath.Join(stateDir, "runs")
+	if mode == "versioned" && strings.TrimSpace(outputDir) != "" {
+		runRoot = filepath.Join(latestDir, "runs")
+	}
+	runDir := filepath.Join(runRoot, runID)
 	artifactStem := sanitizeFileName(stem) + "-" + shortPathHash(absMedia)
 	artifactTranscript := filepath.Join(runDir, artifactStem+".transcript.md")
 	artifactDescription := filepath.Join(runDir, artifactStem+".description.md")
@@ -2376,9 +2412,9 @@ func transcribeWithCohere(ctx context.Context, uvPath string, modelID string, la
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		hint := trimHint(stderr.String())
+		hint := cohereFailureHint(stderr.String())
 		if hint == "" {
-			hint = trimHint(stdout.String())
+			hint = cohereFailureHint(stdout.String())
 		}
 		return ptrError(newError("runtime", "COHERE_TRANSCRIBE_FAILED", err.Error(), true, hint))
 	}
@@ -2970,7 +3006,7 @@ func ensureSession(stateDir string, policy string, sessionID string) (string, *A
 	}
 }
 
-func validateRunInputs(cfg RunConfig) ([]Warning, *AppError) {
+func validateRunInputs(cfg RunConfig, opts validationOptions) ([]Warning, *AppError) {
 	warnings := []Warning{}
 	engine := normalizeEngine(cfg.Engine)
 
@@ -2983,6 +3019,11 @@ func validateRunInputs(cfg RunConfig) ([]Warning, *AppError) {
 	case "whisper", "cohere":
 	default:
 		ae := newError("input", "INVALID_ENGINE", "--engine must be one of whisper|cohere", false, "Use --engine whisper or --engine cohere")
+		return warnings, &ae
+	}
+
+	if !isSupportedLanguageForEngine(engine, cfg.Language) {
+		ae := newError("input", "UNSUPPORTED_LANGUAGE", fmt.Sprintf("unsupported %s language: %s", engine, cfg.Language), false, languageHint(engine))
 		return warnings, &ae
 	}
 
@@ -3037,9 +3078,44 @@ func validateRunInputs(cfg RunConfig) ([]Warning, *AppError) {
 			ae := newError("input", "UNSUPPORTED_COHERE_LANGUAGE", fmt.Sprintf("unsupported cohere language: %s", cfg.Language), false, "Use one of ar|de|el|en|es|fr|it|ja|ko|nl|pl|pt|vi|zh")
 			return warnings, &ae
 		}
+		if strings.TrimSpace(os.Getenv("HF_TOKEN")) == "" {
+			warnings = append(warnings, Warning{Code: "HF_TOKEN_NOT_SET", Message: "HF_TOKEN is not set; Cohere model download may fail for gated models"})
+			if opts.Strict {
+				ae := newError("dependency", "HF_TOKEN_NOT_SET", "HF_TOKEN is required for strict Cohere validation", false, "Set HF_TOKEN after accepting access to the Cohere model on Hugging Face")
+				return warnings, &ae
+			}
+		}
 	}
 
 	return warnings, nil
+}
+
+func isSupportedLanguageForEngine(engine string, language string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(language))
+	switch engine {
+	case "cohere":
+		normalized := normalizeCohereLanguage(language)
+		if normalized == "" {
+			return false
+		}
+		_, ok := cohereSupportedLanguages[normalized]
+		return ok
+	case "whisper":
+		if normalized == "" {
+			return false
+		}
+		_, ok := whisperSupportedLanguages[normalized]
+		return ok
+	default:
+		return true
+	}
+}
+
+func languageHint(engine string) string {
+	if engine == "cohere" {
+		return "Use one of ar|de|el|en|es|fr|it|ja|ko|nl|pl|pt|vi|zh"
+	}
+	return "Use a supported Whisper language code such as en, hr, de, fr, es, pt, ja, zh, or auto"
 }
 
 func normalizeClipboardMode(mode string) string {
@@ -4029,6 +4105,46 @@ func trimHint(s string) string {
 	return trimmed
 }
 
+func ffmpegFailureHint(stderr string) string {
+	lowered := strings.ToLower(stderr)
+	switch {
+	case strings.Contains(lowered, "invalid data found") || strings.Contains(lowered, "could not find codec parameters"):
+		return "Input does not look like valid audio/video. Check the file or convert it with ffmpeg first."
+	case strings.Contains(lowered, "no such file"):
+		return "Input file could not be read by ffmpeg. Check the path and permissions."
+	case strings.Contains(lowered, "permission denied"):
+		return "ffmpeg could not read the input file because permission was denied."
+	}
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "ffmpeg version") || strings.HasPrefix(line, "built with") || strings.HasPrefix(line, "configuration:") || strings.HasPrefix(line, "lib") {
+			continue
+		}
+		return trimHint(line)
+	}
+	return "ffmpeg could not convert the input. Verify the media file is readable and supported."
+}
+
+func cohereFailureHint(output string) string {
+	lowered := strings.ToLower(output)
+	switch {
+	case strings.Contains(lowered, "401") || strings.Contains(lowered, "403") || strings.Contains(lowered, "gated") || strings.Contains(lowered, "unauthorized") || strings.Contains(lowered, "repository not found"):
+		return "Cohere model access failed. Set HF_TOKEN after accepting access to the model on Hugging Face."
+	case strings.Contains(lowered, "no such file") || strings.Contains(lowered, "not found"):
+		return "Cohere runtime could not find a required file or model artifact. Check HF_TOKEN and retry."
+	case strings.Contains(lowered, "out of memory") || strings.Contains(lowered, "memory"):
+		return "Cohere transcription ran out of memory. Retry with Whisper or a smaller input."
+	}
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Traceback ") || strings.HasPrefix(line, "File ") || strings.HasPrefix(line, "Fetching ") {
+			continue
+		}
+		return trimHint(line)
+	}
+	return "Cohere transcription failed. Check HF_TOKEN, model access, and uv/mlx-audio setup."
+}
+
 func envOr(key string, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v
@@ -4178,14 +4294,14 @@ Run Flags:
                              Deterministic manifest URL for runtime asset resolution
   --ffmpeg-path <path>      Use an explicit ffmpeg path
   --llm-path <path>         llm CLI path (description only)
-  --output-dir <path>       Directory for latest transcript/description files (default: next to input)
-  --artifact-mode <mode>    latest|versioned|both (default: both)
+  --output-dir <path>       Directory for latest files, or versioned run artifacts with --artifact-mode versioned
+  --artifact-mode <mode>    latest|versioned|both (default: both; versioned writes runs/<run_id>/ artifacts)
   --keep-temp               Keep intermediate WAV files
 
 Global Flags:
   --output text|json|jsonl  (default: text; jsonl streams progress/events)
   --agent                   JSON output, non-interactive prompts, clipboard disabled for run
-  --strict
+  --strict                  Fail validation on missing required dependencies/credentials
   --non-interactive         Disable interactive prompts (default: false)
   --yes
   --timeout-ms <ms>

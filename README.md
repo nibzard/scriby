@@ -69,6 +69,7 @@ scriby run ./meeting.wav --artifact-mode both       # default: immutable history
 scriby run ./meeting.wav --artifact-mode versioned  # only ~/.scriby/runs/<run_id>/ artifacts
 scriby run ./meeting.wav --artifact-mode latest     # only latest output files
 scriby run ./meeting.wav --output-dir ./out         # latest copies go to ./out
+scriby run ./meeting.wav --artifact-mode versioned --output-dir ./out  # versioned artifacts go to ./out/runs/<run_id>/
 ```
 
 Example:

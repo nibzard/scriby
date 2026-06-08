@@ -77,6 +77,21 @@ func TestRunArtifactPathsModes(t *testing.T) {
 	if versioned.LatestTranscript != "" || versioned.ArtifactTranscript == "" {
 		t.Fatalf("versioned paths = %#v", versioned)
 	}
+	if !strings.Contains(versioned.ArtifactTranscript, filepath.Join(stateDir, "runs", "run-1")) {
+		t.Fatalf("versioned artifact transcript = %q, want under state dir", versioned.ArtifactTranscript)
+	}
+
+	outDir := t.TempDir()
+	versionedOut, err := runArtifactPaths(stateDir, "run-2", media, outDir, "versioned")
+	if err != nil {
+		t.Fatalf("runArtifactPaths versioned output-dir returned error: %v", err)
+	}
+	if versionedOut.LatestTranscript != "" {
+		t.Fatalf("versioned output-dir latest transcript = %q, want empty", versionedOut.LatestTranscript)
+	}
+	if !strings.Contains(versionedOut.ArtifactTranscript, filepath.Join(outDir, "runs", "run-2")) {
+		t.Fatalf("versioned output-dir artifact transcript = %q, want under output dir", versionedOut.ArtifactTranscript)
+	}
 
 	latestDir := t.TempDir()
 	latest, err := runArtifactPaths(stateDir, "run-1", media, latestDir, "latest")
@@ -208,9 +223,31 @@ func TestValidateRunInputsRejectsUnknownEngine(t *testing.T) {
 	cfg := defaultRunConfig()
 	cfg.Input = path
 	cfg.Engine = "other"
-	_, err := validateRunInputs(cfg)
+	_, err := validateRunInputs(cfg, validationOptions{})
 	if err == nil || err.Code != "INVALID_ENGINE" {
 		t.Fatalf("expected INVALID_ENGINE, got %#v", err)
+	}
+}
+
+func TestValidateRunInputsRejectsUnsupportedWhisperLanguage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.wav")
+	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	cfg := defaultRunConfig()
+	cfg.Input = path
+	cfg.Language = "zzz"
+	_, err := validateRunInputs(cfg, validationOptions{})
+	if err == nil || err.Code != "UNSUPPORTED_LANGUAGE" {
+		t.Fatalf("expected UNSUPPORTED_LANGUAGE, got %#v", err)
+	}
+}
+
+func TestAggregateRunStatusTreatsDescriptionFailureAsPartialNotFailed(t *testing.T) {
+	status := aggregateRunStatus(1, 1, 0)
+	if status != "partial" {
+		t.Fatalf("aggregateRunStatus(1, 1, 0) = %q, want partial", status)
 	}
 }
 
@@ -275,7 +312,7 @@ func TestValidateRunInputsRejectsCohereOnNonAppleSilicon(t *testing.T) {
 	cfg := defaultRunConfig()
 	cfg.Input = path
 	cfg.Engine = "cohere"
-	_, err := validateRunInputs(cfg)
+	_, err := validateRunInputs(cfg, validationOptions{})
 	if err == nil || err.Code != "COHERE_REQUIRES_APPLE_SILICON" {
 		t.Fatalf("expected COHERE_REQUIRES_APPLE_SILICON, got %#v", err)
 	}
@@ -295,7 +332,7 @@ func TestValidateRunInputsRejectsCohereTimestamps(t *testing.T) {
 	cfg.Input = path
 	cfg.Engine = "cohere"
 	cfg.Timestamps = true
-	_, err := validateRunInputs(cfg)
+	_, err := validateRunInputs(cfg, validationOptions{})
 	if err == nil || err.Code != "COHERE_TIMESTAMPS_UNSUPPORTED" {
 		t.Fatalf("expected COHERE_TIMESTAMPS_UNSUPPORTED, got %#v", err)
 	}
@@ -305,6 +342,7 @@ func TestValidateRunInputsAcceptsCohereLanguageAliases(t *testing.T) {
 	if !isAppleSilicon() {
 		t.Skip("cohere validation requires Apple Silicon")
 	}
+	t.Setenv("HF_TOKEN", "test-token")
 
 	path := filepath.Join(t.TempDir(), "sample.wav")
 	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
@@ -315,12 +353,67 @@ func TestValidateRunInputsAcceptsCohereLanguageAliases(t *testing.T) {
 	cfg.Input = path
 	cfg.Engine = "cohere"
 	cfg.Language = "zh-CN"
-	warnings, err := validateRunInputs(cfg)
+	warnings, err := validateRunInputs(cfg, validationOptions{})
 	if err != nil {
 		t.Fatalf("validateRunInputs returned error: %#v", err)
 	}
 	if len(warnings) != 0 {
 		t.Fatalf("expected no warnings, got %#v", warnings)
+	}
+}
+
+func TestValidateRunInputsStrictCohereRequiresHFToken(t *testing.T) {
+	if !isAppleSilicon() {
+		t.Skip("cohere validation requires Apple Silicon")
+	}
+	t.Setenv("HF_TOKEN", "")
+
+	path := filepath.Join(t.TempDir(), "sample.wav")
+	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	cfg := defaultRunConfig()
+	cfg.Input = path
+	cfg.Engine = "cohere"
+	_, err := validateRunInputs(cfg, validationOptions{Strict: true})
+	if err == nil || err.Code != "HF_TOKEN_NOT_SET" {
+		t.Fatalf("expected HF_TOKEN_NOT_SET, got %#v", err)
+	}
+}
+
+func TestHandleValidateReportsNoPromptWhenUnset(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.wav")
+	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	env, code := handleValidate([]string{"--state-dir", t.TempDir(), path})
+	if code != exitOK {
+		t.Fatalf("validate code = %d, want %d; env = %#v", code, exitOK, env)
+	}
+	data, ok := env.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("validate data = %#v", env.Data)
+	}
+	checks, ok := data["checks"].(map[string]any)
+	if !ok {
+		t.Fatalf("validate checks = %#v", data["checks"])
+	}
+	if got, _ := checks["prompt_exists"].(bool); got {
+		t.Fatalf("prompt_exists = true, want false when no prompt was provided")
+	}
+}
+
+func TestFailureHintsAreSanitized(t *testing.T) {
+	ffmpegHint := ffmpegFailureHint("ffmpeg version 8.0\n  built with Apple clang\nconfiguration: lots\ninput.mp3: Invalid data found when processing input")
+	if strings.Contains(ffmpegHint, "ffmpeg version") || !strings.Contains(ffmpegHint, "valid audio/video") {
+		t.Fatalf("ffmpegFailureHint returned %q", ffmpegHint)
+	}
+
+	cohereHint := cohereFailureHint("Fetching 14 files: 0%\nTraceback (most recent call last):\nRepository Not Found for url: https://huggingface.co/CohereLabs/cohere-transcribe-03-2026")
+	if strings.Contains(cohereHint, "Traceback") || !strings.Contains(cohereHint, "HF_TOKEN") {
+		t.Fatalf("cohereFailureHint returned %q", cohereHint)
 	}
 }
 
@@ -437,7 +530,7 @@ func TestValidateRunInputsInvalidClipboardMode(t *testing.T) {
 	cfg.Input = path
 	cfg.Clipboard = "sometimes"
 
-	_, err := validateRunInputs(cfg)
+	_, err := validateRunInputs(cfg, validationOptions{})
 	if err == nil {
 		t.Fatal("validateRunInputs should fail for invalid clipboard mode")
 	}
