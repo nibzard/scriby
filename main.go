@@ -31,13 +31,13 @@ import (
 )
 
 const (
-	appVersion                = "2.1.4"
+	appVersion                = "2.1.5"
 	schemaVersion             = "1.0"
 	defaultEngineName         = "whisper"
 	defaultModelName          = "medium"
 	defaultCohereModelID      = "CohereLabs/cohere-transcribe-03-2026"
 	defaultModelURLMedium     = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
-	defaultRuntimeManifestURL = "https://github.com/nibzard/scriby/releases/download/v2.1.4/runtime-manifest.json"
+	defaultRuntimeManifestURL = "https://github.com/nibzard/scriby/releases/download/v2.1.5/runtime-manifest.json"
 
 	exitOK         = 0
 	exitInput      = 2
