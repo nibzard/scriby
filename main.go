@@ -1550,14 +1550,14 @@ func handleHistoryLatest(args []string, started time.Time) (Envelope, int) {
 	args = hoistGlobalFlags(args)
 	env := newEnvelope("history.latest")
 	global := defaultGlobalOptions()
-	includeTranscript := true
+	includeTranscript := false
 	transcriptOnly := false
 	var help bool
 
 	fs := flag.NewFlagSet("history latest", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addGlobalFlags(fs, &global)
-	fs.BoolVar(&includeTranscript, "include-transcript", includeTranscript, "Include transcript and description text")
+	fs.BoolVar(&includeTranscript, "include-transcript", includeTranscript, "Include full transcript and description text")
 	fs.BoolVar(&transcriptOnly, "transcript-only", transcriptOnly, "Return only transcript text for the latest run")
 	addHelpFlags(fs, &help)
 	if err := fs.Parse(args); err != nil {
@@ -1618,14 +1618,14 @@ func handleHistoryShow(args []string, started time.Time) (Envelope, int) {
 	args = hoistGlobalFlags(args)
 	env := newEnvelope("history.show")
 	global := defaultGlobalOptions()
-	includeTranscript := true
+	includeTranscript := false
 	transcriptOnly := false
 	var help bool
 
 	fs := flag.NewFlagSet("history show", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addGlobalFlags(fs, &global)
-	fs.BoolVar(&includeTranscript, "include-transcript", includeTranscript, "Include transcript and description text")
+	fs.BoolVar(&includeTranscript, "include-transcript", includeTranscript, "Include full transcript and description text")
 	fs.BoolVar(&transcriptOnly, "transcript-only", transcriptOnly, "Return only transcript text")
 	addHelpFlags(fs, &help)
 	if err := fs.Parse(args); err != nil {
@@ -1688,6 +1688,7 @@ func handleHistorySearch(args []string, started time.Time) (Envelope, int) {
 	global := defaultGlobalOptions()
 	limit := 20
 	since := ""
+	includeTranscript := false
 	var help bool
 
 	fs := flag.NewFlagSet("history search", flag.ContinueOnError)
@@ -1695,6 +1696,7 @@ func handleHistorySearch(args []string, started time.Time) (Envelope, int) {
 	addGlobalFlags(fs, &global)
 	fs.IntVar(&limit, "limit", limit, "Maximum matches to return")
 	fs.StringVar(&since, "since", since, "Filter matches since RFC3339 date or duration like 7d, 24h")
+	fs.BoolVar(&includeTranscript, "include-transcript", includeTranscript, "Include full transcript and description text in matches")
 	addHelpFlags(fs, &help)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -1739,7 +1741,7 @@ func handleHistorySearch(args []string, started time.Time) (Envelope, int) {
 	}
 	defer db.Close()
 
-	matches, err := history.Search(db, pos[0], limit, sinceTime)
+	matches, err := history.Search(db, pos[0], limit, sinceTime, includeTranscript)
 	if err != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("filesystem", "HISTORY_QUERY_FAILED", err.Error(), false, "Check the SQLite database")}
@@ -3348,7 +3350,7 @@ func printHistoryTextEnvelope(env Envelope) bool {
 			if match.TranscriptPath != "" {
 				fmt.Fprintf(os.Stdout, "transcript: %s\n", match.TranscriptPath)
 			}
-			if preview := textPreview(firstNonEmpty(match.Transcript, match.Description), 260); preview != "" {
+			if preview := textPreview(firstNonEmpty(match.TranscriptPreview, match.DescriptionPreview, match.Transcript, match.Description), 260); preview != "" {
 				fmt.Fprintf(os.Stdout, "%s\n", preview)
 			}
 		}
@@ -3417,14 +3419,22 @@ func printHistoryRunDetail(run history.Run, files []history.Transcription) {
 		if file.ErrorCode != "" {
 			fmt.Fprintf(os.Stdout, "  error: %s\n", file.ErrorCode)
 		}
-		if n := len(strings.TrimSpace(file.Transcript)); n > 0 {
-			fmt.Fprintf(os.Stdout, "  transcript_chars: %d\n", n)
-			if preview := textPreview(file.Transcript, 320); preview != "" {
+		transcriptChars := file.TranscriptChars
+		if transcriptChars == 0 {
+			transcriptChars = int64(len(strings.TrimSpace(file.Transcript)))
+		}
+		if transcriptChars > 0 {
+			fmt.Fprintf(os.Stdout, "  transcript_chars: %d\n", transcriptChars)
+			if preview := textPreview(firstNonEmpty(file.TranscriptPreview, file.Transcript), 320); preview != "" {
 				fmt.Fprintf(os.Stdout, "  preview: %s\n", preview)
 			}
 		}
-		if n := len(strings.TrimSpace(file.Description)); n > 0 {
-			fmt.Fprintf(os.Stdout, "  description_chars: %d\n", n)
+		descriptionChars := file.DescriptionChars
+		if descriptionChars == 0 {
+			descriptionChars = int64(len(strings.TrimSpace(file.Description)))
+		}
+		if descriptionChars > 0 {
+			fmt.Fprintf(os.Stdout, "  description_chars: %d\n", descriptionChars)
 		}
 	}
 }
@@ -4074,9 +4084,9 @@ Purpose:
 Subcommands:
   path                 Print state directory and SQLite database path
   list                 List recent transcription runs (--limit, --status, --since)
-  latest               Show the latest run, optionally --transcript-only
-  show <run_id>        Show one run, files, transcript text, and saved envelope
-  search <query>       Search transcript, description, and file path text (--since)
+  latest               Show the latest run summary, optionally --include-transcript or --transcript-only
+  show <run_id>        Show one run summary, optionally --include-transcript or --transcript-only
+  search <query>       Search transcript, description, and file path text (--since, --include-transcript)
   export <run_id>      Export one run as markdown or json
   schema               Print SQLite table/column schema
   sql <statement>      Run a read-only SELECT/WITH/PRAGMA query

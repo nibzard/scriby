@@ -398,12 +398,22 @@ func TestHistoryRecordStoresTranscriptAndSearches(t *testing.T) {
 		t.Fatalf("history files = %#v", files)
 	}
 
-	matches, err := history.Search(db, "customer discovery", 5, nil)
+	matches, err := history.Search(db, "customer discovery", 5, nil, false)
 	if err != nil {
 		t.Fatalf("history.Search returned error: %v", err)
 	}
 	if len(matches) != 1 || matches[0].RunID != env.RunID {
 		t.Fatalf("history matches = %#v, want run_id %s", matches, env.RunID)
+	}
+	if matches[0].Transcript != "" || !strings.Contains(matches[0].TranscriptPreview, "quarterly planning") || matches[0].TranscriptChars == 0 {
+		t.Fatalf("compact history match = %#v", matches[0])
+	}
+	fullMatches, err := history.Search(db, "customer discovery", 5, nil, true)
+	if err != nil {
+		t.Fatalf("history.Search include transcript returned error: %v", err)
+	}
+	if len(fullMatches) != 1 || !strings.Contains(fullMatches[0].Transcript, "quarterly planning") {
+		t.Fatalf("full history matches = %#v", fullMatches)
 	}
 
 	latest, err := history.LatestRunID(db)
@@ -515,6 +525,22 @@ func TestHandleHistoryLatestExportSchema(t *testing.T) {
 	env.Metrics["files_failed"] = int64(0)
 	if err := saveHistoryRecord(stateDir, env); err != nil {
 		t.Fatalf("saveHistoryRecord returned error: %v", err)
+	}
+
+	compactEnv, code := handleHistory([]string{"--agent", "latest", "--state-dir", stateDir})
+	if code != exitOK {
+		t.Fatalf("history latest compact code = %d env = %#v", code, compactEnv)
+	}
+	compactData, ok := compactEnv.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("compact latest data = %#v", compactEnv.Data)
+	}
+	compactFiles, ok := compactData["files"].([]history.Transcription)
+	if !ok || len(compactFiles) != 1 {
+		t.Fatalf("compact files = %#v", compactData["files"])
+	}
+	if compactFiles[0].Transcript != "" || !strings.Contains(compactFiles[0].TranscriptPreview, "Latest transcript") {
+		t.Fatalf("compact latest should omit full transcript and include preview: %#v", compactFiles[0])
 	}
 
 	latestEnv, code := handleHistory([]string{"--agent", "latest", "--state-dir", stateDir, "--transcript-only"})
@@ -855,6 +881,9 @@ func TestHistorySearchAcceptsTrailingAgent(t *testing.T) {
 	matches, ok := data["matches"].([]history.Transcription)
 	if !ok || len(matches) != 1 {
 		t.Fatalf("matches = %#v", data["matches"])
+	}
+	if matches[0].Transcript != "" || !strings.Contains(matches[0].TranscriptPreview, "developer tools") {
+		t.Fatalf("compact agent match = %#v", matches[0])
 	}
 }
 

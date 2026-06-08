@@ -28,15 +28,19 @@ type Run struct {
 }
 
 type Transcription struct {
-	RunID           string `json:"run_id"`
-	CreatedAt       string `json:"created_at"`
-	File            string `json:"file"`
-	TranscriptPath  string `json:"transcript_path,omitempty"`
-	DescriptionPath string `json:"description_path,omitempty"`
-	Status          string `json:"status"`
-	Transcript      string `json:"transcript,omitempty"`
-	Description     string `json:"description,omitempty"`
-	ErrorCode       string `json:"error_code,omitempty"`
+	RunID              string `json:"run_id"`
+	CreatedAt          string `json:"created_at"`
+	File               string `json:"file"`
+	TranscriptPath     string `json:"transcript_path,omitempty"`
+	DescriptionPath    string `json:"description_path,omitempty"`
+	Status             string `json:"status"`
+	Transcript         string `json:"transcript,omitempty"`
+	Description        string `json:"description,omitempty"`
+	TranscriptPreview  string `json:"transcript_preview,omitempty"`
+	DescriptionPreview string `json:"description_preview,omitempty"`
+	TranscriptChars    int64  `json:"transcript_chars,omitempty"`
+	DescriptionChars   int64  `json:"description_chars,omitempty"`
+	ErrorCode          string `json:"error_code,omitempty"`
 }
 
 type FileRecord struct {
@@ -294,7 +298,12 @@ func GetRun(db *sql.DB, runID string, includeTranscript bool) (Run, []Transcript
 		selectText = "COALESCE(transcript_text, '') AS transcript_text, COALESCE(description_text, '') AS description_text"
 	}
 	rows, err := db.Query(`SELECT run_id, created_at, file_path, COALESCE(transcript_path, ''),
-		COALESCE(description_path, ''), status, `+selectText+`, COALESCE(error_code, '')
+		COALESCE(description_path, ''), status, `+selectText+`,
+		TRIM(SUBSTR(COALESCE(transcript_text, ''), 1, 320)),
+		TRIM(SUBSTR(COALESCE(description_text, ''), 1, 320)),
+		LENGTH(COALESCE(transcript_text, '')),
+		LENGTH(COALESCE(description_text, '')),
+		COALESCE(error_code, '')
 		FROM transcriptions WHERE run_id = ? ORDER BY id ASC`, runID)
 	if err != nil {
 		return Run{}, nil, "", err
@@ -307,7 +316,7 @@ func GetRun(db *sql.DB, runID string, includeTranscript bool) (Run, []Transcript
 	return run, files, envelopeJSON, nil
 }
 
-func Search(db *sql.DB, query string, limit int, since *time.Time) ([]Transcription, error) {
+func Search(db *sql.DB, query string, limit int, since *time.Time, includeTranscript bool) ([]Transcription, error) {
 	like := "%" + escapeLike(query) + "%"
 	where := `WHERE (transcript_text LIKE ? ESCAPE '\' OR description_text LIKE ? ESCAPE '\' OR file_path LIKE ? ESCAPE '\')`
 	args := []any{like, like, like}
@@ -316,8 +325,16 @@ func Search(db *sql.DB, query string, limit int, since *time.Time) ([]Transcript
 		args = append(args, since.UTC().Format(time.RFC3339))
 	}
 	args = append(args, limit)
+	selectText := "'' AS transcript_text, '' AS description_text"
+	if includeTranscript {
+		selectText = "COALESCE(transcript_text, '') AS transcript_text, COALESCE(description_text, '') AS description_text"
+	}
 	rows, err := db.Query(`SELECT run_id, created_at, file_path, COALESCE(transcript_path, ''),
-		COALESCE(description_path, ''), status, COALESCE(transcript_text, ''), COALESCE(description_text, ''),
+		COALESCE(description_path, ''), status, `+selectText+`,
+		TRIM(SUBSTR(COALESCE(transcript_text, ''), 1, 320)),
+		TRIM(SUBSTR(COALESCE(description_text, ''), 1, 320)),
+		LENGTH(COALESCE(transcript_text, '')),
+		LENGTH(COALESCE(description_text, '')),
 		COALESCE(error_code, '')
 		FROM transcriptions
 		`+where+`
@@ -510,7 +527,21 @@ func scanTranscriptions(rows *sql.Rows) ([]Transcription, error) {
 	files := []Transcription{}
 	for rows.Next() {
 		var file Transcription
-		if err := rows.Scan(&file.RunID, &file.CreatedAt, &file.File, &file.TranscriptPath, &file.DescriptionPath, &file.Status, &file.Transcript, &file.Description, &file.ErrorCode); err != nil {
+		if err := rows.Scan(
+			&file.RunID,
+			&file.CreatedAt,
+			&file.File,
+			&file.TranscriptPath,
+			&file.DescriptionPath,
+			&file.Status,
+			&file.Transcript,
+			&file.Description,
+			&file.TranscriptPreview,
+			&file.DescriptionPreview,
+			&file.TranscriptChars,
+			&file.DescriptionChars,
+			&file.ErrorCode,
+		); err != nil {
 			return nil, err
 		}
 		files = append(files, file)
