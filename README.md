@@ -59,6 +59,7 @@ What happens on first run:
 - Scriby downloads the selected model to `~/.scriby/models`.
 - Transcript is written next to your input file as `<name>.md`.
 - Run metadata plus transcript/description text are indexed in `~/.scriby/scriby.db`.
+- If an older cache state exists, Scriby copies it into `~/.scriby` on first use.
 
 Example:
 
@@ -145,6 +146,7 @@ scriby history sql "select run_id, status, input from runs order by created_at d
 ```
 
 Override the location with `--state-dir <path>` or `SCRIBY_STATE_DIR`.
+`history sql` opens the database through a read-only SQLite connection and accepts only single-statement `SELECT`, `WITH`, or `PRAGMA` forms as a pre-filter.
 
 Recovery:
 

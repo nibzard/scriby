@@ -25,7 +25,9 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"scriby/internal/clipboard"
+	history "scriby/internal/history"
+	"scriby/internal/state"
 )
 
 const (
@@ -217,31 +219,6 @@ type DoctorCheck struct {
 	Name    string `json:"name"`
 	Status  string `json:"status"`
 	Details string `json:"details"`
-}
-
-type HistoryRun struct {
-	RunID          string `json:"run_id"`
-	CreatedAt      string `json:"created_at"`
-	Status         string `json:"status"`
-	Input          string `json:"input,omitempty"`
-	Engine         string `json:"engine,omitempty"`
-	ModelRef       string `json:"model_ref,omitempty"`
-	FilesTotal     int64  `json:"files_total"`
-	FilesSucceeded int64  `json:"files_succeeded"`
-	FilesFailed    int64  `json:"files_failed"`
-	DurationMS     int64  `json:"duration_ms"`
-}
-
-type HistoryTranscription struct {
-	RunID           string `json:"run_id"`
-	CreatedAt       string `json:"created_at"`
-	File            string `json:"file"`
-	TranscriptPath  string `json:"transcript_path,omitempty"`
-	DescriptionPath string `json:"description_path,omitempty"`
-	Status          string `json:"status"`
-	Transcript      string `json:"transcript,omitempty"`
-	Description     string `json:"description,omitempty"`
-	ErrorCode       string `json:"error_code,omitempty"`
 }
 
 type StoredRunEnvelope struct {
@@ -1474,7 +1451,7 @@ func handleHistoryPath(args []string, started time.Time) (Envelope, int) {
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitDependency
 	}
-	db, err := openHistoryDB(stateDir)
+	db, err := history.Open(stateDir)
 	if err != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("filesystem", "HISTORY_DB_ERROR", err.Error(), false, "Check the SQLite database path or set --state-dir")}
@@ -1482,7 +1459,7 @@ func handleHistoryPath(args []string, started time.Time) (Envelope, int) {
 		return env, exitDependency
 	}
 	_ = db.Close()
-	env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir)}
+	env.Data = map[string]any{"state_dir": stateDir, "database": history.DBPath(stateDir)}
 	finishEnvelope(&env, started, 0, 0, 0)
 	return env, exitOK
 }
@@ -1527,7 +1504,7 @@ func handleHistoryList(args []string, started time.Time) (Envelope, int) {
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitInput
 	}
-	sinceTime, serr := parseSince(since, time.Now())
+	sinceTime, serr := history.ParseSince(since, time.Now())
 	if serr != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "INVALID_SINCE", serr.Error(), false, "Use --since 7d, --since 24h, or an RFC3339 timestamp")}
@@ -1544,14 +1521,14 @@ func handleHistoryList(args []string, started time.Time) (Envelope, int) {
 	}
 	defer db.Close()
 
-	runs, err := listHistoryRuns(db, limit, status, sinceTime)
+	runs, err := history.ListRuns(db, limit, status, sinceTime)
 	if err != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("filesystem", "HISTORY_QUERY_FAILED", err.Error(), false, "Check the SQLite database")}
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitRuntime
 	}
-	env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir), "runs": runs}
+	env.Data = map[string]any{"state_dir": stateDir, "database": history.DBPath(stateDir), "runs": runs}
 	env.Metrics["rows_total"] = len(runs)
 	finishEnvelope(&env, started, 0, 0, 0)
 	return env, exitOK
@@ -1587,7 +1564,7 @@ func handleHistoryLatest(args []string, started time.Time) (Envelope, int) {
 		includeTranscript = true
 	}
 
-	db, stateDir, herr := openHistoryCommandDB(global)
+	db, stateDir, herr := openHistoryReadOnlyCommandDB(global)
 	if herr != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{*herr}
@@ -1596,14 +1573,14 @@ func handleHistoryLatest(args []string, started time.Time) (Envelope, int) {
 	}
 	defer db.Close()
 
-	runID, err := latestHistoryRunID(db)
+	runID, err := history.LatestRunID(db)
 	if err != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "RUN_NOT_FOUND", "no history runs found", false, "Run scriby run first")}
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitInput
 	}
-	run, files, envelopeJSON, err := getHistoryRun(db, runID, includeTranscript)
+	run, files, envelopeJSON, err := history.GetRun(db, runID, includeTranscript)
 	if err != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "RUN_NOT_FOUND", fmt.Sprintf("run_id not found: %s", runID), false, "Use scriby history list to find run IDs")}
@@ -1611,13 +1588,13 @@ func handleHistoryLatest(args []string, started time.Time) (Envelope, int) {
 		return env, exitInput
 	}
 	if transcriptOnly {
-		env.Data = map[string]any{"run_id": run.RunID, "transcripts": transcriptsOnly(files)}
+		env.Data = map[string]any{"run_id": run.RunID, "transcripts": history.TranscriptsOnly(files)}
 	} else {
 		var replayed Envelope
 		if envelopeJSON != "" {
 			_ = json.Unmarshal([]byte(envelopeJSON), &replayed)
 		}
-		env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir), "run": run, "files": files, "envelope": replayed}
+		env.Data = map[string]any{"state_dir": stateDir, "database": history.DBPath(stateDir), "run": run, "files": files, "envelope": replayed}
 	}
 	env.Metrics["rows_total"] = len(files)
 	finishEnvelope(&env, started, 0, 0, 0)
@@ -1670,7 +1647,7 @@ func handleHistoryShow(args []string, started time.Time) (Envelope, int) {
 	}
 	defer db.Close()
 
-	run, files, envelopeJSON, err := getHistoryRun(db, pos[0], includeTranscript)
+	run, files, envelopeJSON, err := history.GetRun(db, pos[0], includeTranscript)
 	if err != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "RUN_NOT_FOUND", fmt.Sprintf("run_id not found: %s", pos[0]), false, "Use scriby history list to find run IDs")}
@@ -1678,13 +1655,13 @@ func handleHistoryShow(args []string, started time.Time) (Envelope, int) {
 		return env, exitInput
 	}
 	if transcriptOnly {
-		env.Data = map[string]any{"run_id": run.RunID, "transcripts": transcriptsOnly(files)}
+		env.Data = map[string]any{"run_id": run.RunID, "transcripts": history.TranscriptsOnly(files)}
 	} else {
 		var replayed Envelope
 		if envelopeJSON != "" {
 			_ = json.Unmarshal([]byte(envelopeJSON), &replayed)
 		}
-		env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir), "run": run, "files": files, "envelope": replayed}
+		env.Data = map[string]any{"state_dir": stateDir, "database": history.DBPath(stateDir), "run": run, "files": files, "envelope": replayed}
 	}
 	env.Metrics["rows_total"] = len(files)
 	finishEnvelope(&env, started, 0, 0, 0)
@@ -1730,7 +1707,7 @@ func handleHistorySearch(args []string, started time.Time) (Envelope, int) {
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitInput
 	}
-	sinceTime, serr := parseSince(since, time.Now())
+	sinceTime, serr := history.ParseSince(since, time.Now())
 	if serr != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "INVALID_SINCE", serr.Error(), false, "Use --since 7d, --since 24h, or an RFC3339 timestamp")}
@@ -1747,14 +1724,14 @@ func handleHistorySearch(args []string, started time.Time) (Envelope, int) {
 	}
 	defer db.Close()
 
-	matches, err := searchHistory(db, pos[0], limit, sinceTime)
+	matches, err := history.Search(db, pos[0], limit, sinceTime)
 	if err != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("filesystem", "HISTORY_QUERY_FAILED", err.Error(), false, "Check the SQLite database")}
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitRuntime
 	}
-	env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir), "query": pos[0], "matches": matches}
+	env.Data = map[string]any{"state_dir": stateDir, "database": history.DBPath(stateDir), "query": pos[0], "matches": matches}
 	env.Metrics["rows_total"] = len(matches)
 	finishEnvelope(&env, started, 0, 0, 0)
 	return env, exitOK
@@ -1812,7 +1789,7 @@ func handleHistoryExport(args []string, started time.Time) (Envelope, int) {
 
 	runID := ""
 	if latest {
-		id, err := latestHistoryRunID(db)
+		id, err := history.LatestRunID(db)
 		if err != nil {
 			env.Status = "failed"
 			env.Errors = []AppError{newError("input", "RUN_NOT_FOUND", "no history runs found", false, "Run scriby run first")}
@@ -1823,7 +1800,7 @@ func handleHistoryExport(args []string, started time.Time) (Envelope, int) {
 	} else {
 		runID = pos[0]
 	}
-	run, files, _, err := getHistoryRun(db, runID, true)
+	run, files, _, err := history.GetRun(db, runID, true)
 	if err != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "RUN_NOT_FOUND", fmt.Sprintf("run_id not found: %s", runID), false, "Use scriby history list to find run IDs")}
@@ -1831,9 +1808,9 @@ func handleHistoryExport(args []string, started time.Time) (Envelope, int) {
 		return env, exitInput
 	}
 	if format == "json" {
-		env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir), "run": run, "files": files}
+		env.Data = map[string]any{"state_dir": stateDir, "database": history.DBPath(stateDir), "run": run, "files": files}
 	} else {
-		env.Data = map[string]any{"run_id": run.RunID, "format": format, "content": exportHistoryMarkdown(run, files)}
+		env.Data = map[string]any{"run_id": run.RunID, "format": format, "content": history.ExportMarkdown(run, files)}
 	}
 	env.Metrics["rows_total"] = len(files)
 	finishEnvelope(&env, started, 0, 0, 0)
@@ -1872,14 +1849,14 @@ func handleHistorySchema(args []string, started time.Time) (Envelope, int) {
 	}
 	defer db.Close()
 
-	schema, err := historySchema(db)
+	schema, err := history.Schema(db)
 	if err != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("filesystem", "HISTORY_SCHEMA_FAILED", err.Error(), false, "Check the SQLite database")}
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitRuntime
 	}
-	env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir), "schema": schema}
+	env.Data = map[string]any{"state_dir": stateDir, "database": history.DBPath(stateDir), "schema": schema}
 	env.Metrics["rows_total"] = len(schema)
 	finishEnvelope(&env, started, 0, 0, 0)
 	return env, exitOK
@@ -1914,14 +1891,14 @@ func handleHistorySQL(args []string, started time.Time) (Envelope, int) {
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitInput
 	}
-	if !isReadOnlyHistorySQL(query) {
+	if !history.LooksReadOnlySQL(query) {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("input", "UNSAFE_SQL", "history sql only accepts read-only SELECT, WITH, or PRAGMA statements", false, "Use sqlite directly if you need to mutate the database")}
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitInput
 	}
 
-	db, stateDir, herr := openHistoryCommandDB(global)
+	db, stateDir, herr := openHistoryReadOnlyCommandDB(global)
 	if herr != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{*herr}
@@ -1930,14 +1907,14 @@ func handleHistorySQL(args []string, started time.Time) (Envelope, int) {
 	}
 	defer db.Close()
 
-	rows, err := queryHistorySQL(db, query)
+	rows, err := history.QuerySQL(db, query)
 	if err != nil {
 		env.Status = "failed"
 		env.Errors = []AppError{newError("filesystem", "HISTORY_SQL_FAILED", err.Error(), false, "Check the SQL statement")}
 		finishEnvelope(&env, started, 0, 0, 0)
 		return env, exitRuntime
 	}
-	env.Data = map[string]any{"state_dir": stateDir, "database": historyDBPath(stateDir), "rows": rows}
+	env.Data = map[string]any{"state_dir": stateDir, "database": history.DBPath(stateDir), "rows": rows}
 	env.Metrics["rows_total"] = len(rows)
 	finishEnvelope(&env, started, 0, 0, 0)
 	return env, exitOK
@@ -2750,26 +2727,7 @@ func isSupportedMediaFile(path string) bool {
 }
 
 func ensureStateDir(explicit string) (string, error) {
-	if explicit != "" {
-		if err := os.MkdirAll(explicit, 0o755); err != nil {
-			return "", err
-		}
-		ap, err := filepath.Abs(explicit)
-		if err != nil {
-			return explicit, nil
-		}
-		return ap, nil
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return "", errors.New("unable to determine state dir")
-	}
-	stateDir := filepath.Join(home, ".scriby")
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		return "", err
-	}
-	return stateDir, nil
+	return state.Ensure(explicit)
 }
 
 func ensureSession(stateDir string, policy string, sessionID string) (string, *AppError) {
@@ -2866,11 +2824,6 @@ func validateRunInputs(cfg RunConfig) ([]Warning, *AppError) {
 	return warnings, nil
 }
 
-type clipboardCommand struct {
-	Path string
-	Args []string
-}
-
 func normalizeClipboardMode(mode string) string {
 	return strings.ToLower(strings.TrimSpace(mode))
 }
@@ -2929,7 +2882,7 @@ func maybeHandleClipboard(global GlobalOptions, cfg RunConfig, files []FileResul
 		}
 	}
 
-	if err := copyFileToClipboard(transcriptPath); err != nil {
+	if err := clipboard.CopyFile(transcriptPath); err != nil {
 		return []Warning{{
 			Code:    "CLIPBOARD_COPY_FAILED",
 			Message: fmt.Sprintf("Failed to copy transcript to clipboard: %v", err),
@@ -2997,72 +2950,6 @@ func promptYesNo(r io.Reader, w io.Writer, prompt string) (bool, error) {
 	}
 }
 
-func copyFileToClipboard(path string) error {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-	return copyTextToClipboard(string(content))
-}
-
-func copyTextToClipboard(text string) error {
-	cmdInfo, err := clipboardCommandFor(runtime.GOOS, os.Getenv, exec.LookPath)
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(cmdInfo.Path, cmdInfo.Args...)
-	cmd.Stdin = strings.NewReader(text)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if hint := trimHint(stderr.String()); hint != "" {
-			return fmt.Errorf("%w: %s", err, hint)
-		}
-		return err
-	}
-	return nil
-}
-
-func clipboardCommandFor(goos string, getenv func(string) string, lookPath func(string) (string, error)) (clipboardCommand, error) {
-	switch goos {
-	case "darwin":
-		if path, err := lookPath("pbcopy"); err == nil {
-			return clipboardCommand{Path: path}, nil
-		}
-		return clipboardCommand{}, fmt.Errorf("clipboard unavailable: pbcopy not found")
-	case "windows":
-		if path, err := lookPath("clip"); err == nil {
-			return clipboardCommand{Path: path}, nil
-		}
-		if path, err := lookPath("clip.exe"); err == nil {
-			return clipboardCommand{Path: path}, nil
-		}
-		if path, err := lookPath("powershell"); err == nil {
-			return clipboardCommand{Path: path, Args: []string{"-NoProfile", "-Command", "$text = [Console]::In.ReadToEnd(); Set-Clipboard -Value $text"}}, nil
-		}
-		if path, err := lookPath("powershell.exe"); err == nil {
-			return clipboardCommand{Path: path, Args: []string{"-NoProfile", "-Command", "$text = [Console]::In.ReadToEnd(); Set-Clipboard -Value $text"}}, nil
-		}
-		return clipboardCommand{}, fmt.Errorf("clipboard unavailable: clip.exe or powershell not found")
-	default:
-		if getenv("WAYLAND_DISPLAY") != "" || strings.EqualFold(getenv("XDG_SESSION_TYPE"), "wayland") {
-			if path, err := lookPath("wl-copy"); err == nil {
-				return clipboardCommand{Path: path}, nil
-			}
-		}
-		if path, err := lookPath("xclip"); err == nil {
-			return clipboardCommand{Path: path, Args: []string{"-selection", "clipboard"}}, nil
-		}
-		if path, err := lookPath("xsel"); err == nil {
-			return clipboardCommand{Path: path, Args: []string{"--clipboard", "--input"}}, nil
-		}
-		if path, err := lookPath("wl-copy"); err == nil {
-			return clipboardCommand{Path: path}, nil
-		}
-		return clipboardCommand{}, fmt.Errorf("clipboard unavailable: install wl-copy, xclip, or xsel")
-	}
-}
-
 func commandContext(timeoutMS int) (context.Context, context.CancelFunc) {
 	if timeoutMS <= 0 {
 		return context.WithCancel(context.Background())
@@ -3113,7 +3000,7 @@ func loadStoredRunRecord(stateDir string, runID string) (StoredRunEnvelope, erro
 	path := filepath.Join(stateDir, "runs", runID+".json")
 	b, err := os.ReadFile(path)
 	if err != nil {
-		db, dbErr := openHistoryDB(stateDir)
+		db, dbErr := history.Open(stateDir)
 		if dbErr != nil {
 			return StoredRunEnvelope{}, err
 		}
@@ -3213,33 +3100,13 @@ func retryRunArgs(global GlobalOptions, data RunData, input string) []string {
 	return args
 }
 
-func historyDBPath(stateDir string) string {
-	return filepath.Join(stateDir, "scriby.db")
-}
-
-func openHistoryDB(stateDir string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", historyDBPath(stateDir))
-	if err != nil {
-		return nil, err
-	}
-	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if err := ensureHistorySchema(db); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return db, nil
-}
-
 func openHistoryCommandDB(global GlobalOptions) (*sql.DB, string, *AppError) {
 	stateDir, err := ensureStateDir(global.StateDir)
 	if err != nil {
 		ae := newError("filesystem", "STATE_DIR_ERROR", err.Error(), false, "Set --state-dir to a writable directory")
 		return nil, "", &ae
 	}
-	db, err := openHistoryDB(stateDir)
+	db, err := history.Open(stateDir)
 	if err != nil {
 		ae := newError("filesystem", "HISTORY_DB_ERROR", err.Error(), false, "Check the SQLite database path or set --state-dir")
 		return nil, stateDir, &ae
@@ -3247,47 +3114,21 @@ func openHistoryCommandDB(global GlobalOptions) (*sql.DB, string, *AppError) {
 	return db, stateDir, nil
 }
 
-func ensureHistorySchema(db *sql.DB) error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS runs (
-			run_id TEXT PRIMARY KEY,
-			created_at TEXT NOT NULL,
-			command TEXT NOT NULL,
-			status TEXT NOT NULL,
-			session_id TEXT,
-			input TEXT,
-			engine TEXT,
-			model_ref TEXT,
-			envelope_json TEXT NOT NULL,
-			duration_ms INTEGER NOT NULL DEFAULT 0,
-			files_total INTEGER NOT NULL DEFAULT 0,
-			files_succeeded INTEGER NOT NULL DEFAULT 0,
-			files_failed INTEGER NOT NULL DEFAULT 0
-		)`,
-		`CREATE TABLE IF NOT EXISTS transcriptions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-			created_at TEXT NOT NULL,
-			file_path TEXT NOT NULL,
-			transcript_path TEXT,
-			description_path TEXT,
-			status TEXT NOT NULL,
-			transcript_text TEXT,
-			description_text TEXT,
-			error_code TEXT,
-			UNIQUE(run_id, file_path)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status)`,
-		`CREATE INDEX IF NOT EXISTS idx_transcriptions_run_id ON transcriptions(run_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_transcriptions_file_path ON transcriptions(file_path)`,
+func openHistoryReadOnlyCommandDB(global GlobalOptions) (*sql.DB, string, *AppError) {
+	stateDir, err := ensureStateDir(global.StateDir)
+	if err != nil {
+		ae := newError("filesystem", "STATE_DIR_ERROR", err.Error(), false, "Set --state-dir to a writable directory")
+		return nil, "", &ae
 	}
-	for _, stmt := range stmts {
-		if _, err := db.Exec(stmt); err != nil {
-			return err
-		}
+	if db, err := history.Open(stateDir); err == nil {
+		_ = db.Close()
 	}
-	return nil
+	db, err := history.OpenReadOnly(stateDir)
+	if err != nil {
+		ae := newError("filesystem", "HISTORY_DB_ERROR", err.Error(), false, "Check the SQLite database path or set --state-dir")
+		return nil, stateDir, &ae
+	}
+	return db, stateDir, nil
 }
 
 func saveHistoryRecord(stateDir string, env Envelope) error {
@@ -3295,58 +3136,26 @@ func saveHistoryRecord(stateDir string, env Envelope) error {
 	if !ok {
 		return nil
 	}
-	db, err := openHistoryDB(stateDir)
+	envelopeJSON, err := history.MarshalEnvelope(env)
 	if err != nil {
 		return err
 	}
-	defer db.Close()
-
-	tx, err := db.Begin()
-	if err != nil {
-		return err
+	rec := history.Record{
+		RunID:          env.RunID,
+		CreatedAt:      history.RunCreatedAt(env.RunID),
+		Command:        env.Command,
+		Status:         env.Status,
+		SessionID:      env.SessionID,
+		Input:          runData.Input,
+		Engine:         runData.Engine,
+		ModelRef:       runData.ModelRef,
+		EnvelopeJSON:   envelopeJSON,
+		DurationMS:     asInt64(env.Metrics["duration_ms"]),
+		FilesTotal:     asInt64(env.Metrics["files_total"]),
+		FilesSucceeded: asInt64(env.Metrics["files_succeeded"]),
+		FilesFailed:    asInt64(env.Metrics["files_failed"]),
+		Files:          make([]history.FileRecord, 0, len(runData.Files)),
 	}
-	defer tx.Rollback()
-
-	createdAt := runCreatedAt(env.RunID)
-	envelopeBytes, err := json.Marshal(env)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(
-		`INSERT INTO runs (
-			run_id, created_at, command, status, session_id, input, engine, model_ref,
-			envelope_json, duration_ms, files_total, files_succeeded, files_failed
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(run_id) DO UPDATE SET
-			created_at=excluded.created_at,
-			command=excluded.command,
-			status=excluded.status,
-			session_id=excluded.session_id,
-			input=excluded.input,
-			engine=excluded.engine,
-			model_ref=excluded.model_ref,
-			envelope_json=excluded.envelope_json,
-			duration_ms=excluded.duration_ms,
-			files_total=excluded.files_total,
-			files_succeeded=excluded.files_succeeded,
-			files_failed=excluded.files_failed`,
-		env.RunID,
-		createdAt,
-		env.Command,
-		env.Status,
-		env.SessionID,
-		runData.Input,
-		runData.Engine,
-		runData.ModelRef,
-		string(envelopeBytes),
-		asInt64(env.Metrics["duration_ms"]),
-		asInt64(env.Metrics["files_total"]),
-		asInt64(env.Metrics["files_succeeded"]),
-		asInt64(env.Metrics["files_failed"]),
-	); err != nil {
-		return err
-	}
-
 	for _, file := range runData.Files {
 		transcriptText := ""
 		if file.Transcript != "" {
@@ -3360,298 +3169,17 @@ func saveHistoryRecord(stateDir string, env Envelope) error {
 		if file.Error != nil {
 			errorCode = file.Error.Code
 		}
-		if _, err := tx.Exec(
-			`INSERT INTO transcriptions (
-				run_id, created_at, file_path, transcript_path, description_path, status,
-				transcript_text, description_text, error_code
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(run_id, file_path) DO UPDATE SET
-				created_at=excluded.created_at,
-				transcript_path=excluded.transcript_path,
-				description_path=excluded.description_path,
-				status=excluded.status,
-				transcript_text=excluded.transcript_text,
-				description_text=excluded.description_text,
-				error_code=excluded.error_code`,
-			env.RunID,
-			createdAt,
-			file.File,
-			file.Transcript,
-			file.Description,
-			file.Status,
-			transcriptText,
-			descriptionText,
-			errorCode,
-		); err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
-}
-
-func listHistoryRuns(db *sql.DB, limit int, status string, since *time.Time) ([]HistoryRun, error) {
-	query := `SELECT run_id, created_at, status, COALESCE(input, ''), COALESCE(engine, ''),
-		COALESCE(model_ref, ''), files_total, files_succeeded, files_failed, duration_ms
-		FROM runs`
-	args := []any{}
-	clauses := []string{}
-	if status != "" {
-		clauses = append(clauses, `status = ?`)
-		args = append(args, status)
-	}
-	if since != nil {
-		clauses = append(clauses, `created_at >= ?`)
-		args = append(args, since.UTC().Format(time.RFC3339))
-	}
-	if len(clauses) > 0 {
-		query += ` WHERE ` + strings.Join(clauses, ` AND `)
-	}
-	query += ` ORDER BY created_at DESC LIMIT ?`
-	args = append(args, limit)
-
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanHistoryRuns(rows)
-}
-
-func latestHistoryRunID(db *sql.DB) (string, error) {
-	var runID string
-	err := db.QueryRow(`SELECT run_id FROM runs ORDER BY created_at DESC LIMIT 1`).Scan(&runID)
-	return runID, err
-}
-
-func getHistoryRun(db *sql.DB, runID string, includeTranscript bool) (HistoryRun, []HistoryTranscription, string, error) {
-	row := db.QueryRow(`SELECT run_id, created_at, status, COALESCE(input, ''), COALESCE(engine, ''),
-		COALESCE(model_ref, ''), files_total, files_succeeded, files_failed, duration_ms, envelope_json
-		FROM runs WHERE run_id = ?`, runID)
-	var run HistoryRun
-	var envelopeJSON string
-	if err := row.Scan(&run.RunID, &run.CreatedAt, &run.Status, &run.Input, &run.Engine, &run.ModelRef, &run.FilesTotal, &run.FilesSucceeded, &run.FilesFailed, &run.DurationMS, &envelopeJSON); err != nil {
-		return HistoryRun{}, nil, "", err
-	}
-
-	selectText := "'' AS transcript_text, '' AS description_text"
-	if includeTranscript {
-		selectText = "COALESCE(transcript_text, '') AS transcript_text, COALESCE(description_text, '') AS description_text"
-	}
-	rows, err := db.Query(`SELECT run_id, created_at, file_path, COALESCE(transcript_path, ''),
-		COALESCE(description_path, ''), status, `+selectText+`, COALESCE(error_code, '')
-		FROM transcriptions WHERE run_id = ? ORDER BY id ASC`, runID)
-	if err != nil {
-		return HistoryRun{}, nil, "", err
-	}
-	defer rows.Close()
-	files, err := scanHistoryTranscriptions(rows)
-	if err != nil {
-		return HistoryRun{}, nil, "", err
-	}
-	return run, files, envelopeJSON, nil
-}
-
-func searchHistory(db *sql.DB, query string, limit int, since *time.Time) ([]HistoryTranscription, error) {
-	like := "%" + query + "%"
-	where := `WHERE (transcript_text LIKE ? OR description_text LIKE ? OR file_path LIKE ?)`
-	args := []any{like, like, like}
-	if since != nil {
-		where += ` AND created_at >= ?`
-		args = append(args, since.UTC().Format(time.RFC3339))
-	}
-	args = append(args, limit)
-	rows, err := db.Query(`SELECT run_id, created_at, file_path, COALESCE(transcript_path, ''),
-		COALESCE(description_path, ''), status, COALESCE(transcript_text, ''), COALESCE(description_text, ''),
-		COALESCE(error_code, '')
-		FROM transcriptions
-		`+where+`
-		ORDER BY created_at DESC
-		LIMIT ?`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanHistoryTranscriptions(rows)
-}
-
-func historySchema(db *sql.DB) (map[string]any, error) {
-	tables := []string{"runs", "transcriptions"}
-	out := map[string]any{}
-	for _, table := range tables {
-		rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
-		if err != nil {
-			return nil, err
-		}
-		cols := []map[string]any{}
-		for rows.Next() {
-			var cid int
-			var name string
-			var typ string
-			var notNull int
-			var defaultValue any
-			var pk int
-			if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			cols = append(cols, map[string]any{
-				"name":     name,
-				"type":     typ,
-				"not_null": notNull == 1,
-				"primary":  pk > 0,
-			})
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rows.Close()
-		out[table] = cols
-	}
-	return out, nil
-}
-
-func transcriptsOnly(files []HistoryTranscription) []map[string]string {
-	out := []map[string]string{}
-	for _, file := range files {
-		if strings.TrimSpace(file.Transcript) == "" {
-			continue
-		}
-		out = append(out, map[string]string{
-			"file":       file.File,
-			"transcript": file.Transcript,
+		rec.Files = append(rec.Files, history.FileRecord{
+			File:            file.File,
+			TranscriptPath:  file.Transcript,
+			DescriptionPath: file.Description,
+			Status:          file.Status,
+			Transcript:      transcriptText,
+			Description:     descriptionText,
+			ErrorCode:       errorCode,
 		})
 	}
-	return out
-}
-
-func exportHistoryMarkdown(run HistoryRun, files []HistoryTranscription) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "# Scriby Run %s\n\n", run.RunID)
-	fmt.Fprintf(&b, "- status: %s\n", run.Status)
-	if run.Input != "" {
-		fmt.Fprintf(&b, "- input: %s\n", run.Input)
-	}
-	if run.Engine != "" {
-		fmt.Fprintf(&b, "- engine: %s\n", run.Engine)
-	}
-	if run.CreatedAt != "" {
-		fmt.Fprintf(&b, "- created_at: %s\n", run.CreatedAt)
-	}
-	for _, file := range files {
-		fmt.Fprintf(&b, "\n## %s\n\n", file.File)
-		if file.Status != "" {
-			fmt.Fprintf(&b, "- status: %s\n", file.Status)
-		}
-		if file.TranscriptPath != "" {
-			fmt.Fprintf(&b, "- transcript_path: %s\n", file.TranscriptPath)
-		}
-		if strings.TrimSpace(file.Transcript) != "" {
-			fmt.Fprintf(&b, "\n### Transcript\n\n%s\n", strings.TrimSpace(file.Transcript))
-		}
-		if strings.TrimSpace(file.Description) != "" {
-			fmt.Fprintf(&b, "\n### Description\n\n%s\n", strings.TrimSpace(file.Description))
-		}
-	}
-	return b.String()
-}
-
-func parseSince(raw string, now time.Time) (*time.Time, error) {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return nil, nil
-	}
-	if strings.HasSuffix(s, "d") {
-		n, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
-		if err != nil || n <= 0 {
-			return nil, fmt.Errorf("invalid day duration: %s", raw)
-		}
-		t := now.Add(-time.Duration(n) * 24 * time.Hour).UTC()
-		return &t, nil
-	}
-	if d, err := time.ParseDuration(s); err == nil && d > 0 {
-		t := now.Add(-d).UTC()
-		return &t, nil
-	}
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		utc := t.UTC()
-		return &utc, nil
-	}
-	if t, err := time.Parse("2006-01-02", s); err == nil {
-		utc := t.UTC()
-		return &utc, nil
-	}
-	return nil, fmt.Errorf("invalid since value: %s", raw)
-}
-
-func scanHistoryRuns(rows *sql.Rows) ([]HistoryRun, error) {
-	runs := []HistoryRun{}
-	for rows.Next() {
-		var run HistoryRun
-		if err := rows.Scan(&run.RunID, &run.CreatedAt, &run.Status, &run.Input, &run.Engine, &run.ModelRef, &run.FilesTotal, &run.FilesSucceeded, &run.FilesFailed, &run.DurationMS); err != nil {
-			return nil, err
-		}
-		runs = append(runs, run)
-	}
-	return runs, rows.Err()
-}
-
-func scanHistoryTranscriptions(rows *sql.Rows) ([]HistoryTranscription, error) {
-	files := []HistoryTranscription{}
-	for rows.Next() {
-		var file HistoryTranscription
-		if err := rows.Scan(&file.RunID, &file.CreatedAt, &file.File, &file.TranscriptPath, &file.DescriptionPath, &file.Status, &file.Transcript, &file.Description, &file.ErrorCode); err != nil {
-			return nil, err
-		}
-		files = append(files, file)
-	}
-	return files, rows.Err()
-}
-
-func queryHistorySQL(db *sql.DB, query string) ([]map[string]any, error) {
-	rows, err := db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	cols, err := rows.Columns()
-	if err != nil {
-		return nil, err
-	}
-	results := []map[string]any{}
-	for rows.Next() {
-		values := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range values {
-			ptrs[i] = &values[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			return nil, err
-		}
-		row := map[string]any{}
-		for i, col := range cols {
-			switch v := values[i].(type) {
-			case []byte:
-				row[col] = string(v)
-			default:
-				row[col] = v
-			}
-		}
-		results = append(results, row)
-	}
-	return results, rows.Err()
-}
-
-func isReadOnlyHistorySQL(query string) bool {
-	q := strings.TrimSpace(query)
-	q = strings.TrimSuffix(q, ";")
-	if strings.Contains(q, ";") {
-		return false
-	}
-	lower := strings.ToLower(strings.TrimSpace(q))
-	return strings.HasPrefix(lower, "select ") || strings.HasPrefix(lower, "with ") || strings.HasPrefix(lower, "pragma ")
+	return history.Save(stateDir, rec)
 }
 
 func readOptionalTextFile(path string) (string, error) {
@@ -3660,15 +3188,6 @@ func readOptionalTextFile(path string) (string, error) {
 		return "", err
 	}
 	return string(b), nil
-}
-
-func runCreatedAt(runID string) string {
-	if len(runID) >= len("20060102-150405") {
-		if t, err := time.Parse("20060102-150405", runID[:15]); err == nil {
-			return t.UTC().Format(time.RFC3339)
-		}
-	}
-	return time.Now().UTC().Format(time.RFC3339)
 }
 
 func printEnvelope(env Envelope, mode string) error {

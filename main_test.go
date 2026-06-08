@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"scriby/internal/clipboard"
+	history "scriby/internal/history"
 )
 
 func TestModelFilenameNormalization(t *testing.T) {
@@ -354,23 +357,23 @@ func TestHistoryRecordStoresTranscriptAndSearches(t *testing.T) {
 		t.Fatalf("saveHistoryRecord returned error: %v", err)
 	}
 
-	db, err := openHistoryDB(stateDir)
+	db, err := history.Open(stateDir)
 	if err != nil {
-		t.Fatalf("openHistoryDB returned error: %v", err)
+		t.Fatalf("history.Open returned error: %v", err)
 	}
 	defer db.Close()
 
-	runs, err := listHistoryRuns(db, 10, "", nil)
+	runs, err := history.ListRuns(db, 10, "", nil)
 	if err != nil {
-		t.Fatalf("listHistoryRuns returned error: %v", err)
+		t.Fatalf("history.ListRuns returned error: %v", err)
 	}
 	if len(runs) != 1 || runs[0].RunID != env.RunID {
 		t.Fatalf("history runs = %#v, want run_id %s", runs, env.RunID)
 	}
 
-	run, files, _, err := getHistoryRun(db, env.RunID, true)
+	run, files, _, err := history.GetRun(db, env.RunID, true)
 	if err != nil {
-		t.Fatalf("getHistoryRun returned error: %v", err)
+		t.Fatalf("history.GetRun returned error: %v", err)
 	}
 	if run.Engine != "whisper" || run.FilesSucceeded != 1 {
 		t.Fatalf("history run = %#v", run)
@@ -379,48 +382,91 @@ func TestHistoryRecordStoresTranscriptAndSearches(t *testing.T) {
 		t.Fatalf("history files = %#v", files)
 	}
 
-	matches, err := searchHistory(db, "customer discovery", 5, nil)
+	matches, err := history.Search(db, "customer discovery", 5, nil)
 	if err != nil {
-		t.Fatalf("searchHistory returned error: %v", err)
+		t.Fatalf("history.Search returned error: %v", err)
 	}
 	if len(matches) != 1 || matches[0].RunID != env.RunID {
 		t.Fatalf("history matches = %#v, want run_id %s", matches, env.RunID)
 	}
 
-	latest, err := latestHistoryRunID(db)
+	latest, err := history.LatestRunID(db)
 	if err != nil {
-		t.Fatalf("latestHistoryRunID returned error: %v", err)
+		t.Fatalf("history.LatestRunID returned error: %v", err)
 	}
 	if latest != env.RunID {
 		t.Fatalf("latest run = %q, want %q", latest, env.RunID)
 	}
 
-	schema, err := historySchema(db)
+	schema, err := history.Schema(db)
 	if err != nil {
-		t.Fatalf("historySchema returned error: %v", err)
+		t.Fatalf("history.Schema returned error: %v", err)
 	}
 	if _, ok := schema["runs"]; !ok {
 		t.Fatalf("schema missing runs table: %#v", schema)
 	}
 
-	md := exportHistoryMarkdown(run, files)
+	md := history.ExportMarkdown(run, files)
 	if !strings.Contains(md, "Scriby Run") || !strings.Contains(md, "quarterly planning") {
 		t.Fatalf("markdown export = %q", md)
 	}
 }
 
 func TestHistorySQLReadOnlyGuard(t *testing.T) {
-	if !isReadOnlyHistorySQL("select run_id from runs") {
+	if !history.LooksReadOnlySQL("select run_id from runs") {
 		t.Fatal("select should be accepted")
 	}
-	if !isReadOnlyHistorySQL("WITH recent AS (select * from runs) select * from recent") {
+	if !history.LooksReadOnlySQL("WITH recent AS (select * from runs) select * from recent") {
 		t.Fatal("with query should be accepted")
 	}
-	if isReadOnlyHistorySQL("delete from runs") {
+	if history.LooksReadOnlySQL("delete from runs") {
 		t.Fatal("delete should be rejected")
 	}
-	if isReadOnlyHistorySQL("select * from runs; delete from runs") {
+	if history.LooksReadOnlySQL("select * from runs; delete from runs") {
 		t.Fatal("multi-statement query should be rejected")
+	}
+}
+
+func TestHistorySQLReadOnlyConnectionBlocksWithMutation(t *testing.T) {
+	stateDir := t.TempDir()
+	db, err := history.Open(stateDir)
+	if err != nil {
+		t.Fatalf("history.Open returned error: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO runs (
+		run_id, created_at, command, status, envelope_json
+	) VALUES ('seed', '2026-06-08T00:00:00Z', 'run', 'succeeded', '{}')`)
+	_ = db.Close()
+	if err != nil {
+		t.Fatalf("seed insert returned error: %v", err)
+	}
+
+	ro, err := history.OpenReadOnly(stateDir)
+	if err != nil {
+		t.Fatalf("history.OpenReadOnly returned error: %v", err)
+	}
+	defer ro.Close()
+
+	if _, err := history.QuerySQL(ro, `WITH t AS (SELECT 1) DELETE FROM runs`); err == nil {
+		t.Fatal("read-only history SQL should reject WITH ... DELETE")
+	}
+	if _, err := history.QuerySQL(ro, `WITH t AS (SELECT 1) INSERT INTO runs (
+		run_id, created_at, command, status, envelope_json
+	) VALUES ('mutated', '2026-06-08T00:00:00Z', 'run', 'succeeded', '{}')`); err == nil {
+		t.Fatal("read-only history SQL should reject WITH ... INSERT")
+	}
+
+	check, err := history.Open(stateDir)
+	if err != nil {
+		t.Fatalf("history.Open returned error: %v", err)
+	}
+	defer check.Close()
+	var count int
+	if err := check.QueryRow(`SELECT count(*) FROM runs`).Scan(&count); err != nil {
+		t.Fatalf("count query returned error: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("runs count = %d, want 1", count)
 	}
 }
 
@@ -485,16 +531,16 @@ func TestHandleHistoryLatestExportSchema(t *testing.T) {
 
 func TestParseSince(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
-	got, err := parseSince("7d", now)
+	got, err := history.ParseSince("7d", now)
 	if err != nil {
-		t.Fatalf("parseSince returned error: %v", err)
+		t.Fatalf("history.ParseSince returned error: %v", err)
 	}
 	want := now.Add(-7 * 24 * time.Hour)
 	if !got.Equal(want) {
-		t.Fatalf("parseSince(7d) = %s, want %s", got, want)
+		t.Fatalf("history.ParseSince(7d) = %s, want %s", got, want)
 	}
-	if _, err := parseSince("nope", now); err == nil {
-		t.Fatal("parseSince should reject invalid values")
+	if _, err := history.ParseSince("nope", now); err == nil {
+		t.Fatal("history.ParseSince should reject invalid values")
 	}
 }
 
@@ -623,15 +669,15 @@ func TestClipboardCommandFor(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd, err := clipboardCommandFor(tt.goos, getenv(tt.env), lookPath(tt.paths))
+			cmd, err := clipboard.CommandFor(tt.goos, getenv(tt.env), lookPath(tt.paths))
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("clipboardCommandFor error = %v, want substring %q", err, tt.wantErr)
+					t.Fatalf("clipboard.CommandFor error = %v, want substring %q", err, tt.wantErr)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("clipboardCommandFor returned error: %v", err)
+				t.Fatalf("clipboard.CommandFor returned error: %v", err)
 			}
 			if cmd.Path != tt.wantPath {
 				t.Fatalf("cmd.Path = %q, want %q", cmd.Path, tt.wantPath)
