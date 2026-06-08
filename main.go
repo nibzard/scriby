@@ -321,7 +321,7 @@ Commands:
   history    Explore local run/transcription history in SQLite
 
 Global Contract:
-  - Output modes: --output json|jsonl|text (default: json)
+  - Output modes: --output text|json|jsonl (default: text)
   - Agent shortcut: --agent implies --output json, --non-interactive, --yes, and disables run clipboard prompts
   - Stable envelope: schema_version, command, status, run_id, data, errors, warnings, metrics
   - Deterministic exit codes:
@@ -368,7 +368,7 @@ func newEnvelope(command string) Envelope {
 
 func defaultGlobalOptions() GlobalOptions {
 	return GlobalOptions{
-		Output:         envOr("SCRIBY_OUTPUT", "json"),
+		Output:         envOr("SCRIBY_OUTPUT", "text"),
 		Agent:          envBool("SCRIBY_AGENT", false),
 		Strict:         envBool("SCRIBY_STRICT", false),
 		NonInteractive: envBool("SCRIBY_NON_INTERACTIVE", false),
@@ -468,6 +468,7 @@ func finishHelp(env *Envelope, started time.Time, helpText string) (Envelope, in
 
 func handleRun(args []string) (Envelope, int) {
 	started := time.Now()
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("run")
 	global := defaultGlobalOptions()
 	cfg := defaultRunConfig()
@@ -715,6 +716,7 @@ func handleRun(args []string) (Envelope, int) {
 
 func handleValidate(args []string) (Envelope, int) {
 	started := time.Now()
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("validate")
 	global := defaultGlobalOptions()
 	cfg := defaultRunConfig()
@@ -855,6 +857,7 @@ func handleValidate(args []string) (Envelope, int) {
 
 func handleDoctor(args []string) (Envelope, int) {
 	started := time.Now()
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("doctor")
 	global := defaultGlobalOptions()
 	var help bool
@@ -959,6 +962,7 @@ func handleDoctor(args []string) (Envelope, int) {
 
 func handleReplay(args []string) (Envelope, int) {
 	started := time.Now()
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("replay")
 	global := defaultGlobalOptions()
 	var help bool
@@ -1027,6 +1031,7 @@ func handleReplay(args []string) (Envelope, int) {
 
 func handleRetry(args []string) (Envelope, int) {
 	started := time.Now()
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("retry")
 	global := defaultGlobalOptions()
 	failedOnly := false
@@ -1123,6 +1128,7 @@ func handleRetry(args []string) (Envelope, int) {
 
 func handleModels(args []string) (Envelope, int) {
 	started := time.Now()
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("models")
 
 	leadingGlobalArgs, remainingArgs, help, parseErr := splitRootArgs(args)
@@ -1166,6 +1172,7 @@ func handleModels(args []string) (Envelope, int) {
 }
 
 func handleModelsPull(args []string, started time.Time) (Envelope, int) {
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("models.pull")
 	global := defaultGlobalOptions()
 	name := defaultModelName
@@ -1225,6 +1232,7 @@ func handleModelsPull(args []string, started time.Time) (Envelope, int) {
 }
 
 func handleModelsList(args []string, started time.Time) (Envelope, int) {
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("models.list")
 	global := defaultGlobalOptions()
 	var help bool
@@ -1289,6 +1297,7 @@ func handleModelsList(args []string, started time.Time) (Envelope, int) {
 }
 
 func handleModelsPrune(args []string, started time.Time) (Envelope, int) {
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("models.prune")
 	global := defaultGlobalOptions()
 	name := ""
@@ -1369,6 +1378,7 @@ func handleModelsPrune(args []string, started time.Time) (Envelope, int) {
 
 func handleHistory(args []string) (Envelope, int) {
 	started := time.Now()
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("history")
 
 	leadingGlobalArgs, remainingArgs, help, parseErr := splitRootArgs(args)
@@ -1391,7 +1401,7 @@ func handleHistory(args []string) (Envelope, int) {
 	}
 
 	sub := remainingArgs[0]
-	subArgs := append(append([]string{}, leadingGlobalArgs...), remainingArgs[1:]...)
+	subArgs := hoistGlobalFlags(append(append([]string{}, leadingGlobalArgs...), remainingArgs[1:]...))
 	switch sub {
 	case "path":
 		return handleHistoryPath(subArgs, started)
@@ -1422,6 +1432,7 @@ func handleHistory(args []string) (Envelope, int) {
 }
 
 func handleHistoryPath(args []string, started time.Time) (Envelope, int) {
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("history.path")
 	global := defaultGlobalOptions()
 	var help bool
@@ -1465,6 +1476,7 @@ func handleHistoryPath(args []string, started time.Time) (Envelope, int) {
 }
 
 func handleHistoryList(args []string, started time.Time) (Envelope, int) {
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("history.list")
 	global := defaultGlobalOptions()
 	limit := 20
@@ -1535,6 +1547,7 @@ func handleHistoryList(args []string, started time.Time) (Envelope, int) {
 }
 
 func handleHistoryLatest(args []string, started time.Time) (Envelope, int) {
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("history.latest")
 	global := defaultGlobalOptions()
 	includeTranscript := true
@@ -1602,6 +1615,7 @@ func handleHistoryLatest(args []string, started time.Time) (Envelope, int) {
 }
 
 func handleHistoryShow(args []string, started time.Time) (Envelope, int) {
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("history.show")
 	global := defaultGlobalOptions()
 	includeTranscript := true
@@ -1669,6 +1683,7 @@ func handleHistoryShow(args []string, started time.Time) (Envelope, int) {
 }
 
 func handleHistorySearch(args []string, started time.Time) (Envelope, int) {
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("history.search")
 	global := defaultGlobalOptions()
 	limit := 20
@@ -1738,6 +1753,7 @@ func handleHistorySearch(args []string, started time.Time) (Envelope, int) {
 }
 
 func handleHistoryExport(args []string, started time.Time) (Envelope, int) {
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("history.export")
 	global := defaultGlobalOptions()
 	format := "markdown"
@@ -1818,6 +1834,7 @@ func handleHistoryExport(args []string, started time.Time) (Envelope, int) {
 }
 
 func handleHistorySchema(args []string, started time.Time) (Envelope, int) {
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("history.schema")
 	global := defaultGlobalOptions()
 	var help bool
@@ -1863,6 +1880,7 @@ func handleHistorySchema(args []string, started time.Time) (Envelope, int) {
 }
 
 func handleHistorySQL(args []string, started time.Time) (Envelope, int) {
+	args = hoistGlobalFlags(args)
 	env := newEnvelope("history.sql")
 	global := defaultGlobalOptions()
 	var help bool
@@ -3218,6 +3236,9 @@ func printCommandResult(env Envelope, args []string) error {
 }
 
 func printTextEnvelope(env Envelope) error {
+	if printHistoryTextEnvelope(env) {
+		return nil
+	}
 	fmt.Fprintf(os.Stdout, "status: %s\n", env.Status)
 	fmt.Fprintf(os.Stdout, "command: %s\n", env.Command)
 	fmt.Fprintf(os.Stdout, "run_id: %s\n", env.RunID)
@@ -3246,6 +3267,225 @@ func printTextEnvelope(env Envelope) error {
 		fmt.Fprintf(os.Stdout, "metrics:\n%s\n", string(b))
 	}
 	return nil
+}
+
+func printHistoryTextEnvelope(env Envelope) bool {
+	if !strings.HasPrefix(env.Command, "history.") || env.Status != "succeeded" {
+		return false
+	}
+	data, ok := env.Data.(map[string]any)
+	if !ok {
+		return false
+	}
+	switch env.Command {
+	case "history.path":
+		fmt.Fprintf(os.Stdout, "State directory: %s\n", textValue(data["state_dir"]))
+		fmt.Fprintf(os.Stdout, "Database: %s\n", textValue(data["database"]))
+	case "history.list":
+		runs, _ := data["runs"].([]history.Run)
+		fmt.Fprintf(os.Stdout, "History runs: %d\n", len(runs))
+		for _, run := range runs {
+			printHistoryRunSummary(run)
+		}
+	case "history.latest", "history.show":
+		if transcripts, ok := data["transcripts"].([]map[string]string); ok {
+			for i, rec := range transcripts {
+				if i > 0 {
+					fmt.Fprintln(os.Stdout)
+				}
+				if rec["file"] != "" {
+					fmt.Fprintf(os.Stdout, "## %s\n\n", rec["file"])
+				}
+				fmt.Fprintln(os.Stdout, strings.TrimSpace(rec["transcript"]))
+			}
+			return true
+		}
+		run, _ := data["run"].(history.Run)
+		files, _ := data["files"].([]history.Transcription)
+		printHistoryRunDetail(run, files)
+	case "history.search":
+		query := textValue(data["query"])
+		matches, _ := data["matches"].([]history.Transcription)
+		fmt.Fprintf(os.Stdout, "Search: %q\nMatches: %d\n", query, len(matches))
+		for _, match := range matches {
+			fmt.Fprintln(os.Stdout)
+			fmt.Fprintf(os.Stdout, "%s  %s  %s\n", match.RunID, match.Status, match.File)
+			if match.TranscriptPath != "" {
+				fmt.Fprintf(os.Stdout, "transcript: %s\n", match.TranscriptPath)
+			}
+			if preview := textPreview(firstNonEmpty(match.Transcript, match.Description), 260); preview != "" {
+				fmt.Fprintf(os.Stdout, "%s\n", preview)
+			}
+		}
+	case "history.export":
+		if content := textValue(data["content"]); content != "" {
+			fmt.Fprint(os.Stdout, content)
+			if !strings.HasSuffix(content, "\n") {
+				fmt.Fprintln(os.Stdout)
+			}
+			return true
+		}
+		return false
+	case "history.schema":
+		schema, _ := data["schema"].(map[string]any)
+		fmt.Fprintln(os.Stdout, "History schema")
+		for _, table := range []string{"runs", "transcriptions"} {
+			fmt.Fprintf(os.Stdout, "\n%s\n", table)
+			cols, _ := schema[table].([]map[string]any)
+			for _, col := range cols {
+				flags := []string{}
+				if b, _ := col["primary"].(bool); b {
+					flags = append(flags, "primary")
+				}
+				if b, _ := col["not_null"].(bool); b {
+					flags = append(flags, "not null")
+				}
+				suffix := ""
+				if len(flags) > 0 {
+					suffix = " (" + strings.Join(flags, ", ") + ")"
+				}
+				fmt.Fprintf(os.Stdout, "  %-18s %s%s\n", textValue(col["name"]), textValue(col["type"]), suffix)
+			}
+		}
+	case "history.sql":
+		rows, _ := data["rows"].([]map[string]any)
+		printRowsTable(rows)
+	default:
+		return false
+	}
+	return true
+}
+
+func printHistoryRunSummary(run history.Run) {
+	fmt.Fprintf(os.Stdout, "\n%s  %s  %s\n", run.RunID, run.Status, run.CreatedAt)
+	if run.Input != "" {
+		fmt.Fprintf(os.Stdout, "input: %s\n", run.Input)
+	}
+	if run.Engine != "" || run.ModelRef != "" {
+		fmt.Fprintf(os.Stdout, "engine: %s  model: %s\n", run.Engine, run.ModelRef)
+	}
+	fmt.Fprintf(os.Stdout, "files: %d total, %d succeeded, %d failed  duration: %s\n",
+		run.FilesTotal, run.FilesSucceeded, run.FilesFailed, formatMillis(run.DurationMS))
+}
+
+func printHistoryRunDetail(run history.Run, files []history.Transcription) {
+	printHistoryRunSummary(run)
+	for _, file := range files {
+		fmt.Fprintln(os.Stdout)
+		fmt.Fprintf(os.Stdout, "- %s  [%s]\n", file.File, file.Status)
+		if file.TranscriptPath != "" {
+			fmt.Fprintf(os.Stdout, "  transcript: %s\n", file.TranscriptPath)
+		}
+		if file.DescriptionPath != "" {
+			fmt.Fprintf(os.Stdout, "  description: %s\n", file.DescriptionPath)
+		}
+		if file.ErrorCode != "" {
+			fmt.Fprintf(os.Stdout, "  error: %s\n", file.ErrorCode)
+		}
+		if n := len(strings.TrimSpace(file.Transcript)); n > 0 {
+			fmt.Fprintf(os.Stdout, "  transcript_chars: %d\n", n)
+			if preview := textPreview(file.Transcript, 320); preview != "" {
+				fmt.Fprintf(os.Stdout, "  preview: %s\n", preview)
+			}
+		}
+		if n := len(strings.TrimSpace(file.Description)); n > 0 {
+			fmt.Fprintf(os.Stdout, "  description_chars: %d\n", n)
+		}
+	}
+}
+
+func printRowsTable(rows []map[string]any) {
+	if len(rows) == 0 {
+		fmt.Fprintln(os.Stdout, "No rows.")
+		return
+	}
+	cols := []string{}
+	for col := range rows[0] {
+		cols = append(cols, col)
+	}
+	sort.Strings(cols)
+	widths := make([]int, len(cols))
+	for i, col := range cols {
+		widths[i] = len(col)
+	}
+	table := make([][]string, len(rows))
+	for r, row := range rows {
+		table[r] = make([]string, len(cols))
+		for c, col := range cols {
+			value := textPreview(textValue(row[col]), 80)
+			table[r][c] = value
+			if len(value) > widths[c] {
+				widths[c] = len(value)
+			}
+		}
+	}
+	for i, col := range cols {
+		if i > 0 {
+			fmt.Fprint(os.Stdout, "  ")
+		}
+		fmt.Fprintf(os.Stdout, "%-*s", widths[i], col)
+	}
+	fmt.Fprintln(os.Stdout)
+	for i, w := range widths {
+		if i > 0 {
+			fmt.Fprint(os.Stdout, "  ")
+		}
+		fmt.Fprint(os.Stdout, strings.Repeat("-", w))
+	}
+	fmt.Fprintln(os.Stdout)
+	for _, row := range table {
+		for i, value := range row {
+			if i > 0 {
+				fmt.Fprint(os.Stdout, "  ")
+			}
+			fmt.Fprintf(os.Stdout, "%-*s", widths[i], value)
+		}
+		fmt.Fprintln(os.Stdout)
+	}
+}
+
+func textValue(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	case fmt.Stringer:
+		return t.String()
+	default:
+		return fmt.Sprint(t)
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func textPreview(text string, max int) string {
+	s := strings.Join(strings.Fields(text), " ")
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return strings.TrimSpace(s[:max-3]) + "..."
+}
+
+func formatMillis(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	d := time.Duration(ms) * time.Millisecond
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	return d.Round(time.Second).String()
 }
 
 func emitJSONLEvent(command string, runID string, event string, data map[string]any) {
@@ -3326,7 +3566,73 @@ func outputPreference(args []string) (string, string) {
 			return trimmed, "env"
 		}
 	}
-	return "json", "default"
+	if envBool("SCRIBY_AGENT", false) {
+		return "json", "env"
+	}
+	return "text", "default"
+}
+
+func hoistGlobalFlags(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	front := []string{}
+	rest := []string{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if isGlobalBoolFlag(arg) || isGlobalValueFlagEquals(arg) {
+			front = append(front, arg)
+			continue
+		}
+		if isGlobalValueFlag(arg) && i+1 < len(args) {
+			front = append(front, arg, args[i+1])
+			i++
+			continue
+		}
+		rest = append(rest, arg)
+	}
+	if len(front) == 0 {
+		return args
+	}
+	out := make([]string, 0, len(args))
+	out = append(out, front...)
+	out = append(out, rest...)
+	return out
+}
+
+func isGlobalBoolFlag(arg string) bool {
+	switch arg {
+	case "--agent", "--agent=true", "--strict", "--strict=true", "--non-interactive", "--non-interactive=true", "--yes", "--yes=true":
+		return true
+	default:
+		return false
+	}
+}
+
+func isGlobalValueFlag(arg string) bool {
+	switch arg {
+	case "--output", "--timeout-ms", "--max-retries", "--idempotency-key", "--session-policy", "--session-id", "--state-dir":
+		return true
+	default:
+		return false
+	}
+}
+
+func isGlobalValueFlagEquals(arg string) bool {
+	for _, prefix := range []string{
+		"--output=",
+		"--timeout-ms=",
+		"--max-retries=",
+		"--idempotency-key=",
+		"--session-policy=",
+		"--session-id=",
+		"--state-dir=",
+	} {
+		if strings.HasPrefix(arg, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func helpText(env Envelope) (string, bool) {
@@ -3360,7 +3666,7 @@ func shouldPrintRawHelp(args []string) bool {
 	case "flag", "env":
 		return mode == "text"
 	default:
-		return isCharDevice(os.Stdout)
+		return true
 	}
 }
 
@@ -3640,7 +3946,7 @@ Run Flags:
   --keep-temp               Keep intermediate WAV files
 
 Global Flags:
-  --output json|jsonl|text  (jsonl streams progress/events; json/text print progress to stderr)
+  --output text|json|jsonl  (default: text; jsonl streams progress/events)
   --agent                   JSON output, non-interactive prompts, clipboard disabled for run
   --strict
   --non-interactive         Disable interactive prompts (default: false)

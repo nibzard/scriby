@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -59,6 +60,9 @@ func TestDefaultClipboardAndInteractivity(t *testing.T) {
 	global := defaultGlobalOptions()
 	if global.NonInteractive {
 		t.Fatal("defaultGlobalOptions().NonInteractive = true, want false")
+	}
+	if global.Output != "text" {
+		t.Fatalf("defaultGlobalOptions().Output = %q, want text", global.Output)
 	}
 }
 
@@ -769,8 +773,117 @@ func TestOutputPreference(t *testing.T) {
 	}
 
 	t.Setenv("SCRIBY_OUTPUT", "")
+	t.Setenv("SCRIBY_AGENT", "1")
 	mode, source = outputPreference([]string{"run"})
-	if mode != "json" || source != "default" {
-		t.Fatalf("outputPreference default = (%q, %q), want (json, default)", mode, source)
+	if mode != "json" || source != "env" {
+		t.Fatalf("outputPreference SCRIBY_AGENT = (%q, %q), want (json, env)", mode, source)
 	}
+
+	t.Setenv("SCRIBY_AGENT", "")
+	mode, source = outputPreference([]string{"run"})
+	if mode != "text" || source != "default" {
+		t.Fatalf("outputPreference default = (%q, %q), want (text, default)", mode, source)
+	}
+}
+
+func TestHoistGlobalFlagsAllowsTrailingAgent(t *testing.T) {
+	got := hoistGlobalFlags([]string{"developer tools", "--agent"})
+	want := []string{"--agent", "developer tools"}
+	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
+		t.Fatalf("hoistGlobalFlags = %q, want %q", got, want)
+	}
+}
+
+func TestHistorySearchAcceptsTrailingAgent(t *testing.T) {
+	stateDir := t.TempDir()
+	env := newEnvelope("run")
+	env.RunID = "20260224-130000-search"
+	env.Status = "succeeded"
+	env.Data = RunData{
+		Input:  "meeting.wav",
+		Engine: "whisper",
+		Files: []FileResult{{
+			File:       "meeting.wav",
+			Transcript: "missing.md",
+			Status:     "succeeded",
+		}},
+	}
+	env.Metrics["duration_ms"] = int64(10)
+	env.Metrics["files_total"] = int64(1)
+	env.Metrics["files_succeeded"] = int64(1)
+	env.Metrics["files_failed"] = int64(0)
+	if err := history.Save(stateDir, history.Record{
+		RunID:          env.RunID,
+		CreatedAt:      "2026-02-24T13:00:00Z",
+		Command:        "run",
+		Status:         "succeeded",
+		Input:          "meeting.wav",
+		Engine:         "whisper",
+		EnvelopeJSON:   `{"schema_version":"1.0"}`,
+		DurationMS:     10,
+		FilesTotal:     1,
+		FilesSucceeded: 1,
+		Files: []history.FileRecord{{
+			File:       "meeting.wav",
+			Status:     "succeeded",
+			Transcript: "developer tools strategy",
+		}},
+	}); err != nil {
+		t.Fatalf("save history: %v", err)
+	}
+
+	got, code := handleHistory([]string{"search", "developer tools", "--agent", "--state-dir", stateDir})
+	if code != exitOK {
+		t.Fatalf("history search code = %d env = %#v", code, got)
+	}
+	data, ok := got.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("history search data = %T", got.Data)
+	}
+	matches, ok := data["matches"].([]history.Transcription)
+	if !ok || len(matches) != 1 {
+		t.Fatalf("matches = %#v", data["matches"])
+	}
+}
+
+func TestHistoryExportTextPrintsMarkdown(t *testing.T) {
+	env := newEnvelope("history.export")
+	env.Data = map[string]any{
+		"run_id":  "run-1",
+		"format":  "markdown",
+		"content": "# Scriby Run run-1\n\nTranscript body.\n",
+	}
+	finishEnvelope(&env, time.Now(), 0, 0, 0)
+
+	out := captureStdout(t, func() {
+		if err := printEnvelope(env, "text"); err != nil {
+			t.Fatalf("printEnvelope returned error: %v", err)
+		}
+	})
+	if !strings.HasPrefix(out, "# Scriby Run run-1\n") {
+		t.Fatalf("text export output = %q", out)
+	}
+	if strings.Contains(out, `"schema_version"`) || strings.Contains(out, `"content"`) {
+		t.Fatalf("text export should not print JSON envelope: %q", out)
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	os.Stdout = old
+	b, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	return string(b)
 }
