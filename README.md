@@ -34,6 +34,28 @@ sudo install /tmp/scriby /usr/local/bin/scriby
 scriby --help
 ```
 
+## Install from source
+
+Requires [Go](https://go.dev/dl/) 1.24+.
+
+```bash
+git clone https://github.com/nibzard/scriby.git
+cd scriby
+make build
+```
+
+This produces a `scriby` binary in the repo root. Install it onto your `PATH`:
+
+```bash
+# user-local (no sudo)
+install -m 0755 scriby ~/.local/bin/scriby
+
+# or system-wide
+sudo install -m 0755 scriby /usr/local/bin/scriby
+
+scriby --version
+```
+
 ## Quickstart (first setup + first run)
 
 Prerequisite:
