@@ -1265,3 +1265,64 @@ func captureStdout(t *testing.T, fn func()) string {
 	}
 	return string(b)
 }
+
+func TestBuildconfHasSoxr(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "enabled", in: "  --enable-shared\n  --enable-libsoxr\n", want: true},
+		{name: "absent", in: "  --enable-shared\n  --enable-libopus\n", want: false},
+		{name: "empty", in: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := buildconfHasSoxr(tt.in); got != tt.want {
+				t.Fatalf("buildconfHasSoxr(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResampleFilterFallsBackWithoutSoxr(t *testing.T) {
+	if got, want := resampleFilter(16000, true), "aresample=16000:resampler=soxr:precision=28"; got != want {
+		t.Fatalf("resampleFilter with soxr = %q, want %q", got, want)
+	}
+	if got, want := resampleFilter(16000, false), "aresample=16000"; got != want {
+		t.Fatalf("resampleFilter without soxr = %q, want %q", got, want)
+	}
+}
+
+// Reproduces the conversion failure seen on ffmpeg builds without libsoxr,
+// where every input file failed with FFMPEG_CONVERT_FAILED.
+func TestConvertToTempWAVOnLocalFFmpeg(t *testing.T) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+
+	ctx := context.Background()
+	src := filepath.Join(t.TempDir(), "source.m4a")
+	gen := exec.CommandContext(ctx, ffmpegPath, "-y",
+		"-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+		"-c:a", "aac", src)
+	if out, err := gen.CombinedOutput(); err != nil {
+		t.Skipf("could not build test input: %v: %s", err, out)
+	}
+
+	wavPath, _, appErr := convertToTempWAV(ctx, ffmpegPath, src, 16000, "average")
+	if appErr != nil {
+		t.Fatalf("convertToTempWAV failed: %s: %s", appErr.Code, appErr.Hint)
+	}
+	defer os.Remove(wavPath)
+
+	info, err := os.Stat(wavPath)
+	if err != nil {
+		t.Fatalf("stat converted wav: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("converted wav is empty")
+	}
+}

@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"scriby/internal/clipboard"
@@ -2130,6 +2131,33 @@ func processMediaFile(
 	return fr, warnings, nil
 }
 
+var soxrSupportCache sync.Map // ffmpeg path -> bool
+
+// buildconfHasSoxr reports whether an ffmpeg build configuration includes the soxr resampler.
+func buildconfHasSoxr(buildconf string) bool {
+	return strings.Contains(buildconf, "--enable-libsoxr")
+}
+
+// ffmpegSupportsSoxr reports whether the ffmpeg binary can use the soxr resampling engine.
+// Builds without libsoxr reject "resampler=soxr" and fail the conversion.
+func ffmpegSupportsSoxr(ctx context.Context, ffmpegPath string) bool {
+	if cached, ok := soxrSupportCache.Load(ffmpegPath); ok {
+		return cached.(bool)
+	}
+	out, err := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-buildconf").CombinedOutput()
+	supported := err == nil && buildconfHasSoxr(string(out))
+	soxrSupportCache.Store(ffmpegPath, supported)
+	return supported
+}
+
+// resampleFilter builds the aresample filter, requesting soxr only where the build provides it.
+func resampleFilter(sampleRate int, soxr bool) string {
+	if soxr {
+		return fmt.Sprintf("aresample=%d:resampler=soxr:precision=28", sampleRate)
+	}
+	return fmt.Sprintf("aresample=%d", sampleRate)
+}
+
 func convertToTempWAV(ctx context.Context, ffmpegPath, input string, sampleRate int, monoMode string) (string, *Warning, *AppError) {
 	tmp, err := os.CreateTemp("", "scriby-*.wav")
 	if err != nil {
@@ -2168,7 +2196,7 @@ func convertToTempWAV(ctx context.Context, ffmpegPath, input string, sampleRate 
 	args := []string{
 		"-y",
 		"-i", input,
-		"-af", fmt.Sprintf("%s,aresample=%d:resampler=soxr:precision=28", filter, sampleRate),
+		"-af", fmt.Sprintf("%s,%s", filter, resampleFilter(sampleRate, ffmpegSupportsSoxr(ctx, ffmpegPath))),
 		"-c:a", "pcm_s16le",
 		tmpPath,
 	}
